@@ -47,6 +47,32 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai::gpt-5.4"] * 3)
 
 
+def test_apply_runtime_provider_defaults_autofills_openai_compatible_models():
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENAI_COMPATIBLE_API_KEY": "sk-compatible",
+        "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
+        "OUROBOROS_MODEL": "anthropic/claude-opus-4.6",
+        "OUROBOROS_MODEL_CODE": "anthropic/claude-opus-4.6",
+        "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
+        "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+        "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.4,anthropic/claude-opus-4.6",
+    })
+
+    assert changed
+    assert set(changed_keys) == {
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_REVIEW_MODELS",
+    }
+    assert normalized["OUROBOROS_MODEL"] == "openai-compatible::gpt-5.5"
+    assert normalized["OUROBOROS_MODEL_CODE"] == "openai-compatible::gpt-5.5"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai-compatible::gpt-5.4"
+    assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai-compatible::gpt-5.4"
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == ",".join(["openai-compatible::gpt-5.5"] * 3)
+
+
 def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",

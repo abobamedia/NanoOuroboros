@@ -87,7 +87,27 @@ def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
     if executable in SAFE_SHELL_COMMANDS:
         return executable
 
-    if _is_explicit_python_interpreter(executable):
+    is_project_venv_python = False
+    try:
+        path = pathlib.Path(str(argv[0]).strip()).expanduser()
+        if path.is_absolute():
+            repo_dir = pathlib.Path(
+                os.environ.get("OUROBOROS_REPO_DIR") or pathlib.Path.cwd()
+            ).expanduser().resolve()
+            candidates = (
+                repo_dir / ".venv" / "bin" / "python",
+                repo_dir / ".venv" / "bin" / "python3",
+                repo_dir / ".venv" / "Scripts" / "python.exe",
+            )
+            resolved_path = path.resolve()
+            is_project_venv_python = any(
+                candidate.exists() and resolved_path == candidate.resolve()
+                for candidate in candidates
+            )
+    except (OSError, RuntimeError, ValueError):
+        is_project_venv_python = False
+
+    if _is_explicit_python_interpreter(executable) or is_project_venv_python:
         for idx, part in enumerate(argv[1:-1], start=1):
             if part == "-m":
                 module = str(argv[idx + 1]).lower()

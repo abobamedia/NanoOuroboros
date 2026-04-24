@@ -30,6 +30,7 @@ _active_subprocesses: set = set()
 _subprocess_lock = threading.Lock()
 
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
+_PYTEST_MODULE_NAMES = frozenset({"pytest", "py.test"})
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
@@ -88,6 +89,43 @@ def _resolve_effective_timeout(default_timeout_sec: int) -> int:
         except ValueError:
             pass
     return max(int(default_timeout_sec), 1)
+
+
+def _normalize_pytest_interpreter(repo_dir: pathlib.Path, cmd: list[str]) -> list[str]:
+    """Route explicit python -m pytest calls through the project venv when present."""
+    if not cmd:
+        return cmd
+    repo_path = pathlib.Path(repo_dir)
+    venv_candidates = (
+        repo_path / ".venv" / "bin" / "python",
+        repo_path / ".venv" / "bin" / "python3",
+        repo_path / ".venv" / "Scripts" / "python.exe",
+    )
+    venv_python = next((p for p in venv_candidates if p.exists() and p.is_file()), None)
+    executable = str(cmd[0] or "").strip()
+    token = executable.lower()
+    is_plain_python = (
+        token in {"python", "python3"}
+        or ("/" not in token and "\\" not in token and bool(re.fullmatch(r"python\d+(?:\.\d+)?(?:\.exe)?", token)))
+    )
+    is_project_venv = False
+    if venv_python is not None:
+        try:
+            is_project_venv = pathlib.Path(executable).expanduser().resolve() == venv_python.resolve()
+        except (OSError, RuntimeError, ValueError):
+            is_project_venv = False
+    if not (is_plain_python or is_project_venv):
+        return cmd
+    is_pytest = False
+    for idx, part in enumerate(cmd[1:-1], start=1):
+        if part == "-m":
+            is_pytest = str(cmd[idx + 1]).lower() in _PYTEST_MODULE_NAMES
+            break
+        if part == "-c":
+            break
+    if not is_pytest or is_project_venv or venv_python is None:
+        return cmd
+    return [str(venv_python), *cmd[1:]]
 
 
 def _describe_returncode(returncode: int) -> str:
@@ -244,13 +282,15 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
 
-    work_dir = ctx.repo_dir
+    repo_dir = pathlib.Path(ctx.repo_dir)
+    work_dir = repo_dir
     if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
+        candidate = (repo_dir / cwd).resolve()
         if candidate.exists() and candidate.is_dir():
             work_dir = candidate
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
+    cmd = _normalize_pytest_interpreter(repo_dir, cmd)
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
     try:
@@ -340,8 +380,12 @@ def _get_diff_stat(repo_dir: pathlib.Path) -> str:
 def _run_validation(repo_dir: pathlib.Path) -> str:
     """Run basic validation after edit (tests). Returns summary."""
     try:
-        res = subprocess.run(
+        cmd = _normalize_pytest_interpreter(
+            pathlib.Path(repo_dir),
             ["python", "-m", "pytest", "tests/", "--tb=line", "-q"],
+        )
+        res = subprocess.run(
+            cmd,
             cwd=str(repo_dir), capture_output=True, text=True, timeout=60,
         )
         if res.returncode == 0:

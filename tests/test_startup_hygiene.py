@@ -1,5 +1,6 @@
 import pathlib
 import types
+import logging
 
 import ouroboros.agent_startup_checks as startup_mod
 import ouroboros.world_profiler as world_profiler
@@ -74,6 +75,37 @@ def test_check_uncommitted_changes_skips_auto_rescue_outside_launcher(monkeypatc
     assert result["auto_committed"] is False
     assert result["auto_rescue_skipped"] == "not_launcher_managed"
     assert calls == [["git", "status", "--porcelain"]]
+
+
+def test_check_uncommitted_changes_skip_log_is_debug_and_deduped(monkeypatch, tmp_path, caplog):
+    env = types.SimpleNamespace(
+        repo_dir=tmp_path,
+        repo_path=lambda rel: tmp_path / rel,
+        launcher_managed=False,
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            return types.SimpleNamespace(returncode=0, stdout=" M server.py\n")
+        raise AssertionError(cmd)
+
+    monkeypatch.delenv("OUROBOROS_MANAGED_BY_LAUNCHER", raising=False)
+    monkeypatch.setattr(startup_mod.subprocess, "run", fake_run)
+    startup_mod._AUTO_RESCUE_SKIP_LOGGED_REPOS.clear()
+    caplog.set_level(logging.DEBUG, logger=startup_mod.__name__)
+
+    startup_mod.check_uncommitted_changes(env)
+    startup_mod.check_uncommitted_changes(env)
+
+    warning_records = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "skipping auto-rescue commit outside launcher-managed mode" in record.getMessage()
+    ]
+    assert warning_records == []
+    assert len(debug_messages) == 2
+    assert "duplicate suppressed" in debug_messages[1]
 
 
 def test_check_uncommitted_changes_auto_rescue_when_launcher_managed(monkeypatch, tmp_path):

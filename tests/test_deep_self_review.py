@@ -88,7 +88,7 @@ class TestIsReviewAvailable:
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
             available, model = is_review_available()
         assert available is True
-        assert model == "openai/gpt-5.4-pro"
+        assert model == "openai/gpt-5.5-pro"
 
     def test_openai(self):
         env = {"OPENAI_API_KEY": "sk-test"}
@@ -96,9 +96,29 @@ class TestIsReviewAvailable:
             # Ensure OPENROUTER_API_KEY and OPENAI_BASE_URL are not set
             os.environ.pop("OPENROUTER_API_KEY", None)
             os.environ.pop("OPENAI_BASE_URL", None)
+            os.environ.pop("OPENAI_COMPATIBLE_API_KEY", None)
             available, model = is_review_available()
         assert available is True
-        assert model == "openai::gpt-5.4-pro"
+        assert model == "openai::gpt-5.5-pro"
+
+    def test_openai_compatible(self):
+        env = {"OPENAI_COMPATIBLE_API_KEY": "sk-compatible"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            os.environ.pop("OPENAI_API_KEY", None)
+            os.environ.pop("OPENAI_BASE_URL", None)
+            available, model = is_review_available()
+        assert available is True
+        assert model == "openai-compatible::gpt-5.5"
+
+    def test_env_override(self):
+        env = {
+            "OUROBOROS_DEEP_SELF_REVIEW_MODEL": "openai-compatible::gpt-5.5",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            available, model = is_review_available()
+        assert available is True
+        assert model == "openai-compatible::gpt-5.5"
 
     def test_none(self):
         with mock.patch.dict(os.environ, {}, clear=True):

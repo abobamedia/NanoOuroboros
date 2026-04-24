@@ -33,7 +33,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, Cloud.ru, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -48,6 +48,23 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["TOTAL_BUDGET"] == 10.0
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+
+
+def test_prepare_onboarding_settings_accepts_openai_compatible_only_setup():
+    payload = _base_payload()
+    payload["OPENAI_COMPATIBLE_API_KEY"] = "sk-compatible-1234567890"
+    payload["OPENAI_COMPATIBLE_BASE_URL"] = "https://gateway.example/v1"
+    payload["OUROBOROS_MODEL"] = "openai-compatible::gpt-5.5"
+    payload["OUROBOROS_MODEL_CODE"] = "openai-compatible::gpt-5.5"
+    payload["OUROBOROS_MODEL_LIGHT"] = "openai-compatible::gpt-5.4"
+    payload["OUROBOROS_MODEL_FALLBACK"] = "openai-compatible::gpt-5.4"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "sk-compatible-1234567890"
+    assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "https://gateway.example/v1"
+    assert prepared["OUROBOROS_MODEL"] == "openai-compatible::gpt-5.5"
 
 
 def test_prepare_onboarding_settings_accepts_cloudru_only_setup():
@@ -143,6 +160,7 @@ def test_build_onboarding_html_adapts_to_multi_provider_access():
     assert "return 'direct-multi';" in html
     assert "OPENROUTER_API_KEY: trim(state.openrouterKey)" in html
     assert "OPENAI_API_KEY: trim(state.openaiKey)" in html
+    assert "OPENAI_COMPATIBLE_API_KEY: trim(state.openaiCompatibleKey)" in html
     assert "ANTHROPIC_API_KEY: trim(state.anthropicKey)" in html
     assert "LOCAL_ROUTING_MODE: trim(state.localSource) ? (trim(state.localRoutingMode) || 'cloud') : 'cloud'" in html
 

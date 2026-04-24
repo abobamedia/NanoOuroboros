@@ -21,6 +21,13 @@ from ouroboros.provider_models import normalize_anthropic_model_id
 log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "anthropic/claude-sonnet-4.6"
+_REMOTE_CLIENT_TIMEOUT = {
+    "connect": 15.0,
+    "read": 900.0,
+    "write": 60.0,
+    "pool": 15.0,
+}
+_REMOTE_TIMEOUT_BACKOFF_SEC = (1.0, 2.0)
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -351,10 +358,12 @@ class LLMClient:
         client = self._remote_clients.get(cache_key)
         if client is None:
             from openai import OpenAI
+            import httpx
 
             kwargs: Dict[str, Any] = {
                 "api_key": api_key,
-                "max_retries": 0,
+                "max_retries": 2,
+                "timeout": httpx.Timeout(**_REMOTE_CLIENT_TIMEOUT),
             }
             if base_url:
                 kwargs["base_url"] = base_url
@@ -390,10 +399,12 @@ class LLMClient:
         client = self._async_remote_clients.get(cache_key)
         if client is None:
             from openai import AsyncOpenAI
+            import httpx
 
             kwargs: Dict[str, Any] = {
                 "api_key": api_key,
-                "max_retries": 0,
+                "max_retries": 2,
+                "timeout": httpx.Timeout(**_REMOTE_CLIENT_TIMEOUT),
             }
             if base_url:
                 kwargs["base_url"] = base_url
@@ -523,7 +534,10 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
-        resp = await client.chat.completions.create(**kwargs)
+        resp = await self._execute_remote_with_backoff_async(
+            lambda: client.chat.completions.create(**kwargs),
+            target=target,
+        )
         return self._normalize_remote_response(resp.model_dump(), target)
 
     def _prepare_messages_for_local_context(
@@ -1202,6 +1216,78 @@ class LLMClient:
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
 
+    @staticmethod
+    def _is_retryable_remote_timeout(exc: Exception) -> bool:
+        exc_type = type(exc).__name__
+        if exc_type == "APITimeoutError":
+            return True
+        try:
+            import httpx
+
+            if isinstance(exc, httpx.TimeoutException):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _execute_remote_with_backoff(
+        self,
+        request_fn,
+        *,
+        target: Dict[str, Any],
+    ):
+        provider = str(target.get("provider") or "unknown")
+        model = str(target.get("resolved_model") or "")
+        attempts = len(_REMOTE_TIMEOUT_BACKOFF_SEC) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return request_fn()
+            except Exception as exc:
+                if not self._is_retryable_remote_timeout(exc) or attempt >= attempts:
+                    raise
+                delay = _REMOTE_TIMEOUT_BACKOFF_SEC[attempt - 1]
+                log.warning(
+                    "Retrying remote LLM call after timeout",
+                    extra={
+                        "provider": provider,
+                        "model": model,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "backoff_sec": delay,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                time.sleep(delay)
+
+    async def _execute_remote_with_backoff_async(
+        self,
+        request_fn,
+        *,
+        target: Dict[str, Any],
+    ):
+        provider = str(target.get("provider") or "unknown")
+        model = str(target.get("resolved_model") or "")
+        attempts = len(_REMOTE_TIMEOUT_BACKOFF_SEC) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await request_fn()
+            except Exception as exc:
+                if not self._is_retryable_remote_timeout(exc) or attempt >= attempts:
+                    raise
+                delay = _REMOTE_TIMEOUT_BACKOFF_SEC[attempt - 1]
+                log.warning(
+                    "Retrying async remote LLM call after timeout",
+                    extra={
+                        "provider": provider,
+                        "model": model,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "backoff_sec": delay,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                await asyncio.sleep(delay)
+
     def _normalize_remote_response(
         self,
         resp_dict: Dict[str, Any],
@@ -1312,7 +1398,10 @@ class LLMClient:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
                 )
-                resp = _oa_client.chat.completions.create(**kwargs)
+                resp = self._execute_remote_with_backoff(
+                    lambda: _oa_client.chat.completions.create(**kwargs),
+                    target=target,
+                )
                 # Pass no_proxy=True to _normalize_remote_response so the
                 # _fetch_generation_cost fallback (which uses requests.get with
                 # default proxy / OS lookup) is skipped — it would re-introduce
@@ -1328,7 +1417,10 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
-        resp = client.chat.completions.create(**kwargs)
+        resp = self._execute_remote_with_backoff(
+            lambda: client.chat.completions.create(**kwargs),
+            target=target,
+        )
         return self._normalize_remote_response(resp.model_dump(), target)
 
     def _chat_openrouter(

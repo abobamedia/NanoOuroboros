@@ -1,3 +1,5 @@
+from unittest import mock
+
 import pytest
 import ouroboros.pricing as pricing_module
 from ouroboros.llm import LLMClient
@@ -240,6 +242,121 @@ def test_normalize_remote_response_estimates_cost_for_direct_openai(monkeypatch)
     assert usage["cached_tokens"] == 10
     assert usage["cost"] == 0.123456
     assert seen["args"] == ("openai/gpt-5.2", 100, 40, 10, 0)
+
+
+def test_get_remote_client_sets_explicit_retry_and_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    client = LLMClient()
+    target = client._resolve_remote_target("openai::gpt-5.2")
+
+    with mock.patch("openai.OpenAI") as mock_openai_cls:
+        created = mock.Mock()
+        mock_openai_cls.return_value = created
+
+        result = client._get_remote_client(target)
+
+    assert result is created
+    kwargs = mock_openai_cls.call_args.kwargs
+    assert kwargs["max_retries"] == 2
+    timeout = kwargs["timeout"]
+    assert timeout.connect == 15.0
+    assert timeout.read == 900.0
+    assert timeout.write == 60.0
+    assert timeout.pool == 15.0
+
+
+def test_chat_remote_retries_timeout_then_succeeds(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    class APITimeoutError(Exception):
+        pass
+
+    client = LLMClient()
+    target = client._resolve_remote_target("openai::gpt-5.2")
+    response = mock.Mock()
+    response.model_dump.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    mock_sdk_client = mock.Mock()
+    mock_sdk_client.chat.completions.create.side_effect = [APITimeoutError("gateway timeout"), response]
+
+    with mock.patch.object(client, "_get_remote_client", return_value=mock_sdk_client):
+        with mock.patch("ouroboros.llm.time.sleep") as mock_sleep:
+            message, usage = client._chat_remote(
+                target,
+                [{"role": "user", "content": "hi"}],
+                None,
+                "medium",
+                128,
+                "auto",
+            )
+
+    assert message["content"] == "ok"
+    assert usage["provider"] == "openai"
+    assert mock_sdk_client.chat.completions.create.call_count == 2
+    mock_sleep.assert_called_once_with(1.0)
+
+
+def test_chat_remote_does_not_retry_non_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    client = LLMClient()
+    target = client._resolve_remote_target("openai::gpt-5.2")
+    mock_sdk_client = mock.Mock()
+    mock_sdk_client.chat.completions.create.side_effect = RuntimeError("boom")
+
+    with mock.patch.object(client, "_get_remote_client", return_value=mock_sdk_client):
+        with mock.patch("ouroboros.llm.time.sleep") as mock_sleep:
+            with pytest.raises(RuntimeError, match="boom"):
+                client._chat_remote(
+                    target,
+                    [{"role": "user", "content": "hi"}],
+                    None,
+                    "medium",
+                    128,
+                    "auto",
+                )
+
+    assert mock_sdk_client.chat.completions.create.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_chat_async_retries_timeout_then_succeeds(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    class APITimeoutError(Exception):
+        pass
+
+    client = LLMClient()
+    response = mock.Mock()
+    response.model_dump.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "ok-async"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    mock_sdk_client = mock.Mock()
+    mock_sdk_client.chat.completions.create = mock.AsyncMock(
+        side_effect=[APITimeoutError("gateway timeout"), response]
+    )
+
+    with mock.patch.object(client, "_get_async_remote_client", return_value=mock_sdk_client):
+        with mock.patch("ouroboros.llm.asyncio.sleep", new=mock.AsyncMock()) as mock_sleep:
+            message, usage = asyncio.run(
+                client.chat_async(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="openai::gpt-5.2",
+                    reasoning_effort="medium",
+                    max_tokens=128,
+                )
+            )
+
+    assert message["content"] == "ok-async"
+    assert usage["provider"] == "openai"
+    assert mock_sdk_client.chat.completions.create.await_count == 2
+    mock_sleep.assert_awaited_once_with(1.0)
 
 
 def test_build_anthropic_messages_rejects_tool_result_without_tool_call_id(monkeypatch):

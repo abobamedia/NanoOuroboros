@@ -111,13 +111,20 @@ def _exclusive_direct_remote_provider_env() -> str:
     has_legacy_base = bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
     has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
     has_cloudru = bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
-    if has_openrouter or has_legacy_base or has_compatible or has_cloudru:
+
+    if has_openrouter:
         return ""
-    if has_openai and not has_anthropic:
-        return "openai"
-    if has_anthropic and not has_openai:
-        return "anthropic"
-    return ""
+
+    providers = []
+    if has_openai and not has_legacy_base:
+        providers.append("openai")
+    if has_anthropic:
+        providers.append("anthropic")
+    if has_compatible:
+        providers.append("openai-compatible")
+    if has_cloudru:
+        providers.append("cloudru")
+    return providers[0] if len(providers) == 1 else ""
 
 
 def resolve_effort(task_type: str) -> str:
