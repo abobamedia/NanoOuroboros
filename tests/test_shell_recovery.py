@@ -1,5 +1,6 @@
 """Tests for shell tool arg contract and run_shell behavior."""
 import inspect
+import pathlib
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
@@ -120,3 +121,26 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
 
     assert "TOOL_TIMEOUT (run_shell)" in result
     assert "42s" in result
+
+
+def test_run_shell_routes_pytest_through_project_venv(tmp_path, monkeypatch):
+    ctx = SimpleNamespace(repo_dir=tmp_path)
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["cwd"] = pathlib.Path(kwargs["cwd"])
+        return CompletedProcess(cmd, 0, "ok", "")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {})
+
+    result = _run_shell(ctx, ["python3", "-m", "pytest", "tests/test_example.py", "-q"])
+
+    assert "exit_code=0" in result
+    assert captured["cmd"][0] == str(venv_python)
+    assert captured["cmd"][1:] == ["-m", "pytest", "tests/test_example.py", "-q"]
+    assert captured["cwd"] == tmp_path

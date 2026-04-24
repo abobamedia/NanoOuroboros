@@ -102,11 +102,13 @@
     function detectProviderProfile() {
         const hasOpenrouter = trim(state.openrouterKey).length >= 10;
         const hasOpenai = trim(state.openaiKey).length >= 10;
+        const hasOpenaiCompatible = trim(state.openaiCompatibleKey).length >= 10;
         const hasCloudru = trim(state.cloudruKey).length >= 10;
         const hasAnthropic = trim(state.anthropicKey).length >= 10;
         if (hasOpenrouter) return 'openrouter';
-        if ([hasOpenai, hasCloudru, hasAnthropic].filter(Boolean).length > 1) return 'direct-multi';
+        if ([hasOpenai, hasOpenaiCompatible, hasCloudru, hasAnthropic].filter(Boolean).length > 1) return 'direct-multi';
         if (hasOpenai) return 'openai';
+        if (hasOpenaiCompatible) return 'openai-compatible';
         if (hasCloudru) return 'cloudru';
         if (hasAnthropic) return 'anthropic';
         if (hasLocalModel()) return 'local';
@@ -121,6 +123,7 @@
 
     function profileLabel(profile) {
         if (profile === 'openai') return 'OpenAI';
+        if (profile === 'openai-compatible') return 'OpenAI-compatible';
         if (profile === 'cloudru') return 'Cloud.ru Foundation Models';
         if (profile === 'anthropic') return 'Anthropic';
         if (profile === 'direct-multi') return 'Direct multi-provider';
@@ -194,18 +197,22 @@
     function validateProvidersStep() {
         const openrouterKey = trim(state.openrouterKey);
         const openaiKey = trim(state.openaiKey);
+        const openaiCompatibleKey = trim(state.openaiCompatibleKey);
+        const openaiCompatibleBaseUrl = trim(state.openaiCompatibleBaseUrl);
         const cloudruKey = trim(state.cloudruKey);
         const anthropicKey = trim(state.anthropicKey);
         const localSource = trim(state.localSource);
         const localFilename = trim(state.localFilename);
         if (openrouterKey && openrouterKey.length < 10) return 'OpenRouter API key looks too short.';
         if (openaiKey && openaiKey.length < 10) return 'OpenAI API key looks too short.';
+        if (openaiCompatibleKey && openaiCompatibleKey.length < 10) return 'OpenAI-compatible API key looks too short.';
+        if (openaiCompatibleKey && !openaiCompatibleBaseUrl) return 'OpenAI-compatible setups need a base URL.';
         if (cloudruKey && cloudruKey.length < 10) return 'Cloud.ru Foundation Models API key looks too short.';
         if (anthropicKey && anthropicKey.length < 10) return 'Anthropic API key looks too short.';
-        if (!openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && !localSource) {
+        if (!openrouterKey && !openaiKey && !openaiCompatibleKey && !cloudruKey && !anthropicKey && !localSource) {
             return 'Enter at least one remote key or a local model source before continuing.';
         }
-        if (localSource && !openrouterKey && !openaiKey && !cloudruKey && !anthropicKey && trim(state.localRoutingMode) === 'cloud') {
+        if (localSource && !openrouterKey && !openaiKey && !openaiCompatibleKey && !cloudruKey && !anthropicKey && trim(state.localRoutingMode) === 'cloud') {
             return 'Local-only setups must route at least one model to the local runtime.';
         }
         if (localSource && localSource.includes('/') && !isLocalFilesystemSource(localSource) && !localFilename) {
@@ -478,6 +485,7 @@
         ];
         if (trim(state.openrouterKey)) rows.splice(1, 0, ['OpenRouter', 'configured']);
         if (trim(state.openaiKey)) rows.splice(1, 0, ['OpenAI', 'configured']);
+        if (trim(state.openaiCompatibleKey)) rows.splice(1, 0, ['OpenAI-compatible', 'configured']);
         if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
         if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
         if (hasLocalModel()) {
@@ -511,11 +519,13 @@
                             ? 'Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.'
                             : selectedProfile === 'openai'
                                 ? 'OpenAI is present, so the next step prefills direct openai:: model values.'
-                                : selectedProfile === 'cloudru'
-                                    ? 'Cloud.ru is present, so the next step prefills direct cloudru:: model values.'
-                                : selectedProfile === 'anthropic'
-                                    ? 'Anthropic is present, so the next step prefills direct anthropic:: model values.'
-                                    : 'No remote key is present yet, so local-only setup remains available below.'
+                                : selectedProfile === 'openai-compatible'
+                                    ? 'OpenAI-compatible is present, so the next step prefills direct openai-compatible:: model values.'
+                                    : selectedProfile === 'cloudru'
+                                        ? 'Cloud.ru is present, so the next step prefills direct cloudru:: model values.'
+                                        : selectedProfile === 'anthropic'
+                                            ? 'Anthropic is present, so the next step prefills direct anthropic:: model values.'
+                                            : 'No remote key is present yet, so local-only setup remains available below.'
                 )}</p>
             </div>
             <div class="field-grid">
@@ -534,6 +544,22 @@
                     </div>
                     <input id="openai-key" type="password" placeholder="sk-..." value="${escapeHtml(state.openaiKey)}">
                     <div class="field-note">Optional. If this is the only remote key, the next step prefills direct <code>openai::...</code> models.</div>
+                </div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label for="openai-compatible-key">OpenAI-compatible API Key</label>
+                        <button class="field-clear" data-clear="openai-compatible-key" type="button">Clear</button>
+                    </div>
+                    <input id="openai-compatible-key" type="password" placeholder="Gateway API key" value="${escapeHtml(state.openaiCompatibleKey)}">
+                    <div class="field-note">Optional. For gateways such as nekocode. Uses <code>openai-compatible::...</code> model IDs.</div>
+                </div>
+                <div class="field">
+                    <div class="field-label-row">
+                        <label for="openai-compatible-base-url">OpenAI-compatible Base URL</label>
+                        <button class="field-clear" data-clear="openai-compatible-base-url" type="button">Clear</button>
+                    </div>
+                    <input id="openai-compatible-base-url" placeholder="https://gateway.example/v1" value="${escapeHtml(state.openaiCompatibleBaseUrl)}">
+                    <div class="field-note">Required when an OpenAI-compatible key is configured.</div>
                 </div>
                 <div class="field">
                     <div class="field-label-row">
@@ -637,15 +663,17 @@
                 <p>${escapeHtml(
                     activeProviderProfile() === 'openai'
                         ? 'OpenAI-only setup detected. These defaults are explicit and official.'
-                        : activeProviderProfile() === 'cloudru'
-                            ? 'Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs.'
-                        : activeProviderProfile() === 'anthropic'
-                            ? 'Anthropic-only setup detected. These defaults are explicit and official.'
-                        : activeProviderProfile() === 'direct-multi'
-                                ? 'Multiple direct providers are configured. Start here, then split model slots across them if you want.'
-                                : activeProviderProfile() === 'local'
-                                    ? 'Local-only setup detected. Review the model values and local routing before launch.'
-                                    : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
+                        : activeProviderProfile() === 'openai-compatible'
+                            ? 'OpenAI-compatible setup detected. These defaults use explicit openai-compatible:: model IDs.'
+                            : activeProviderProfile() === 'cloudru'
+                                ? 'Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs.'
+                            : activeProviderProfile() === 'anthropic'
+                                ? 'Anthropic-only setup detected. These defaults are explicit and official.'
+                                : activeProviderProfile() === 'direct-multi'
+                                    ? 'Multiple direct providers are configured. Start here, then split model slots across them if you want.'
+                                    : activeProviderProfile() === 'local'
+                                        ? 'Local-only setup detected. Review the model values and local routing before launch.'
+                                        : 'OpenRouter-style routing remains active. Unprefixed provider IDs like openai/gpt-5.4 or anthropic/claude-sonnet-4.6 continue to route through OpenRouter.'
                 )}</p>
             </div>
             <div class="grid two">
@@ -670,7 +698,7 @@
                     <div class="field-note">Fallback and resilience path.</div>
                 </div>
             </div>
-            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.4</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
+            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.4</code>, <code>openai-compatible::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
             <datalist id="model-suggestions">${suggestionOptions}</datalist>
         `;
     }
@@ -808,6 +836,8 @@
                 const target = button.getAttribute('data-clear');
                 if (target === 'openrouter-key') state.openrouterKey = '';
                 if (target === 'openai-key') state.openaiKey = '';
+                if (target === 'openai-compatible-key') state.openaiCompatibleKey = '';
+                if (target === 'openai-compatible-base-url') state.openaiCompatibleBaseUrl = '';
                 if (target === 'cloudru-key') state.cloudruKey = '';
                 if (target === 'anthropic-key') state.anthropicKey = '';
                 if (target === 'local-preset') {
@@ -835,6 +865,8 @@
         }
         const openrouterInput = document.getElementById('openrouter-key');
         const openaiInput = document.getElementById('openai-key');
+        const openaiCompatibleInput = document.getElementById('openai-compatible-key');
+        const openaiCompatibleBaseUrlInput = document.getElementById('openai-compatible-base-url');
         const cloudruInput = document.getElementById('cloudru-key');
         const anthropicInput = document.getElementById('anthropic-key');
         const localPreset = document.getElementById('local-preset');
@@ -846,6 +878,8 @@
 
         if (openrouterInput) openrouterInput.addEventListener('input', () => { state.openrouterKey = openrouterInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (openaiInput) openaiInput.addEventListener('input', () => { state.openaiKey = openaiInput.value; state.error = ''; syncCurrentStepActionState(); });
+        if (openaiCompatibleInput) openaiCompatibleInput.addEventListener('input', () => { state.openaiCompatibleKey = openaiCompatibleInput.value; state.error = ''; syncCurrentStepActionState(); });
+        if (openaiCompatibleBaseUrlInput) openaiCompatibleBaseUrlInput.addEventListener('input', () => { state.openaiCompatibleBaseUrl = openaiCompatibleBaseUrlInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (cloudruInput) cloudruInput.addEventListener('input', () => { state.cloudruKey = cloudruInput.value; state.error = ''; syncCurrentStepActionState(); });
         if (anthropicInput) anthropicInput.addEventListener('input', () => {
             const wasConfigured = hasAnthropicKeyConfigured();
@@ -1030,6 +1064,8 @@
         const payload = {
             OPENROUTER_API_KEY: trim(state.openrouterKey),
             OPENAI_API_KEY: trim(state.openaiKey),
+            OPENAI_COMPATIBLE_API_KEY: trim(state.openaiCompatibleKey),
+            OPENAI_COMPATIBLE_BASE_URL: trim(state.openaiCompatibleBaseUrl),
             CLOUDRU_FOUNDATION_MODELS_API_KEY: trim(state.cloudruKey),
             ANTHROPIC_API_KEY: trim(state.anthropicKey),
             TOTAL_BUDGET: Number(state.totalBudget || 0),

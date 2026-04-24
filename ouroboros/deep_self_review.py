@@ -197,10 +197,15 @@ def is_review_available() -> Tuple[bool, Optional[str]]:
 
     Returns (available, model_id).
     """
+    configured = str(os.environ.get("OUROBOROS_DEEP_SELF_REVIEW_MODEL", "") or "").strip()
+    if configured:
+        return True, configured
     if os.environ.get("OPENROUTER_API_KEY"):
-        return True, "openai/gpt-5.4-pro"
+        return True, "openai/gpt-5.5-pro"
     if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
-        return True, "openai::gpt-5.4-pro"
+        return True, "openai::gpt-5.5-pro"
+    if os.environ.get("OPENAI_COMPATIBLE_API_KEY"):
+        return True, "openai-compatible::gpt-5.5"
     return False, None
 
 

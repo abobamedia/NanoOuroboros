@@ -39,14 +39,13 @@ from ouroboros.review_state import (
     update_state,
     _utc_now,
 )
+from ouroboros.tools.advisory_prompt import (
+    _build_blocking_history_section,
+    build_advisory_prompt as _build_advisory_prompt,
+)
 from ouroboros.tools.review_helpers import (
     build_advisory_changed_context,
-    build_blocking_findings_json_section,
-    load_checklist_section,
-    build_goal_section,
-    build_scope_section,
     check_worktree_version_sync as _check_worktree_version_sync_shared,
-    CRITICAL_FINDING_CALIBRATION,
     get_advisory_runtime_diagnostics as _get_runtime_diagnostics,
     format_advisory_sdk_error as _format_advisory_error,
 )
@@ -64,16 +63,6 @@ _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
 # Claude Code has a 1M token context; 1.6M chars ≈ 400K tokens leaves healthy headroom.
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens
 _OBLIGATION_SUFFIX_RE = re.compile(r"\s*\(obligation\s+([a-f0-9]+)\)\s*$", re.IGNORECASE)
-
-
-def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
-    try:
-        p = repo_dir / relpath
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    return fallback
 
 
 def _get_staged_diff(
@@ -144,212 +133,22 @@ def _get_changed_file_list(
         return f"⚠️ ADVISORY_ERROR: git status error: {exc}"
 
 
-def _build_blocking_history_section(drive_root: pathlib.Path, repo_key: str = "") -> str:
-    """Build a section summarizing unresolved obligations from all blocking rounds.
-
-    Reads repo-scoped blocking_history and open_obligations from durable state.
-    The advisory reviewer must explicitly address every open obligation.
-    Returns an empty string when there are no blocking obligations.
-    """
-    try:
-        state = load_state(drive_root)
-    except Exception:
-        return ""
-
-    return build_blocking_findings_json_section(
-        state.get_open_obligations(repo_key=repo_key),
-        state.get_blocking_history(repo_key=repo_key),
-    )
-
-
-def _build_advisory_prompt(
+def _prepare_advisory_prompt_context(
     repo_dir: pathlib.Path,
     commit_message: str,
-    goal: str = "",
-    scope: str = "",
-    resolved_paths: Optional[List[str]] = None,
-    drive_root: Optional[pathlib.Path] = None,
-    diff: Optional[str] = None,
-    changed_files: Optional[str] = None,
-    touched_pack: str = "",
-    omitted_paths: Optional[List[str]] = None,
-) -> str:
-    """Build the read-only advisory review prompt.
-
-    Includes: BIBLE.md, CHECKLISTS.md, DEVELOPMENT.md, git status, staged diff,
-    touched file pack, goal/scope sections, and blocking history.
-    Does NOT include raw chat/task context.
-
-    ``diff`` and ``changed_files`` may be provided by the caller to avoid
-    double-fetching (and to ensure validation already ran before prompt build).
-    If absent, they are fetched lazily here — callers that pre-validate should
-    always pass them in.
-    """
-    bible = _load_doc(repo_dir, "BIBLE.md", "(BIBLE.md not found)")
-    try:
-        checklists = load_checklist_section("Repo Commit Checklist")
-    except Exception:
-        checklists = _load_doc(repo_dir, "docs/CHECKLISTS.md", "(CHECKLISTS.md not found)")
-    dev_guide = _load_doc(repo_dir, "docs/DEVELOPMENT.md", "(DEVELOPMENT.md not found)")
-    arch_doc = _load_doc(repo_dir, "docs/ARCHITECTURE.md", "(ARCHITECTURE.md not found)")
-    if diff is None:
-        diff = _get_staged_diff(repo_dir, paths=resolved_paths)
-    if changed_files is None:
-        changed_files = _get_changed_file_list(repo_dir, paths=resolved_paths)
-    goal_section = build_goal_section(goal, scope, commit_message)
-    scope_section = build_scope_section(scope)
-
-    # Build blocking history section if drive_root is available
-    blocking_history = ""
-    if drive_root:
-        blocking_history = _build_blocking_history_section(
-            drive_root,
-            make_repo_key(repo_dir),
-        )
-
-    omitted_note = ""
-    if omitted_paths:
-        preview = ", ".join(list(omitted_paths)[:5])
-        if len(omitted_paths) > 5:
-            preview += f", +{len(omitted_paths) - 5} more"
-        omitted_note = (
-            f"\n*(Inline pack contains omission notes for {len(omitted_paths)} path(s): {preview})*\n"
-        )
-
-    critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
-
-    prompt = f"""\
-You are performing a pre-commit review of an Ouroboros self-modifying AI agent codebase.
-
-## Your role — NON-NEGOTIABLE REQUIREMENTS
-- Review the current working tree changes with the SAME RIGOR as the downstream blocking reviewers.
-  A false PASS here wastes an entire blocking review cycle ($10+).
-- Use ONLY Read, Grep, Glob tools. Do NOT edit or execute any files.
-- Read the FULL CONTENT of every changed file listed below using the Read tool.
-  Do NOT evaluate security, bible compliance, or code quality from path listings or diff hunks alone.
-- Return ONLY a JSON array. No prose, no markdown fences — only the JSON array.
-
-## Thoroughness requirements
-- Do NOT stop after finding the first issue. Check EVERY item in the checklist.
-- Report ALL problems you find. If there are 5 bugs, list all 5 — each as a separate entry.
-- Do NOT summarize multiple distinct problems into one finding.
-- For PASS: brief reason is fine. For FAIL: cite the specific file, line/symbol, what is wrong,
-  and provide a CONCRETE fix suggestion so the developer knows exactly what to change.
-
-## Severity thresholds — treat as blocking reviewers do
-- bible_compliance (item 1): ANY violation of BIBLE.md principles is CRITICAL.
-- security_issues (item 5): ANY path traversal, secret leakage, or unsafe operation is CRITICAL.
-- development_compliance (item 2): naming, entity type rules, module size, no ad-hoc LLM calls,
-  no hardcoded [:N] truncation of cognitive artifacts — all CRITICAL when violated.
-- self_consistency (item 13): if a concrete stale artifact exists (specific file + line), CRITICAL.
-
-## Critical finding calibration (shared with triad and scope reviewers)
-
-{critical_calibration}
-
-## Output format
-Return ONLY a JSON array. Each element:
-{{
-  "item": "<checklist item name>",
-  "verdict": "PASS" | "FAIL",
-  "severity": "critical" | "advisory",
-  "reason": "<for FAIL: file, line/symbol, what is wrong, how to fix>"
-}}
-
-## CHECKLISTS.md (What to review)
-
-{checklists}
-
-{scope_section}
-
-{goal_section}
-
-## DEVELOPMENT.md (Engineering standards)
-
-{dev_guide}
-
-## BIBLE.md (Constitutional context — top priority)
-
-{bible}
-
-## ARCHITECTURE.md (System structure — critical for version sync and module checks)
-
-{arch_doc}
-
-{blocking_history}
-
-## Commit message
-
-{commit_message}
-
-## Changed files (git status --porcelain)
-
-{changed_files}
-
-## Current touched files (full content — read these with the Read tool for deeper inspection)
-
-{touched_pack}
-{omitted_note}
-
-## Staged diff
-
-{diff}
-
-## Step-by-step instructions
-1. Read the FULL content of every changed file using the Read tool. Do not skip any file.
-2. Check EVERY item from the "Repo Commit Checklist" — do not stop after the first issue.
-3. Pay equal attention to ALL 13 checklist items. bible_compliance and security_issues must be
-   evaluated at the same strictness as the downstream blocking reviewers.
-4. Look for ALL bugs, logic errors, regressions, race conditions, and violations of BIBLE.md or DEVELOPMENT.md.
-5. Cross-check: do tool descriptions in prompts match actual get_tools() exports?
-   Does ARCHITECTURE.md header version match the VERSION file?
-6. **MANDATORY — Prior obligations:** If an "Unresolved obligations" section appears above,
-   address EVERY listed obligation explicitly in your output:
-   a. Include a separate JSON entry per obligation for the corresponding checklist item.
-   b. If fixed: verdict=PASS, reason must state WHAT closes it (file, line, symbol, change).
-   c. If not fixed: verdict=FAIL, severity=critical, reason must name the specific stale artifact.
-   d. **TARGETING — multiple obligations with the same checklist item:**
-      When two or more open obligations share the same item (e.g. two distinct `code_quality`
-      findings), you MUST emit a separate JSON entry for EACH one and use the
-      `(obligation <id>)` suffix in the `"item"` field to target it precisely:
-        {{"item": "code_quality (obligation abc123def456)", "verdict": "PASS", ...}}
-      A generic `"item": "code_quality"` entry when multiple same-item obligations are
-      open will NOT resolve all of them — only the one matched by `obligation_id` will
-      be closed; the rest remain open until explicitly addressed.
-7. Output ONLY the JSON array — no markdown fences, no commentary outside the JSON.
-"""
-    return prompt
-
-
-def _run_claude_advisory(
-    repo_dir: pathlib.Path,
-    commit_message: str,
-    ctx: ToolContext,
     goal: str = "",
     scope: str = "",
     paths: Optional[List[str]] = None,
     drive_root: Optional[pathlib.Path] = None,
-) -> tuple[list, str]:
-    """Run the advisory review via Claude Agent SDK (read-only).
-
-    Returns (items, raw_result). raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
-
-    # Resolve model — single source of truth, honours CLAUDE_CODE_MODEL setting
-    from ouroboros.gateways.claude_code import resolve_claude_code_model
-    model = resolve_claude_code_model()
-
+) -> tuple[str, list[str], str] | str:
     # Fetch diff and changed-file list exactly once, validate, then pass into prompt builder.
     diff_text = _get_staged_diff(repo_dir, paths=paths)
     if diff_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], diff_text
+        return diff_text
 
     changed_files_text = _get_changed_file_list(repo_dir, paths=paths)
     if changed_files_text.startswith("⚠️ ADVISORY_ERROR:"):
-        return [], changed_files_text
+        return changed_files_text
 
     # Parse touched paths from porcelain output to avoid a second git-status call inside
     # build_touched_file_pack.  Lines are "XY filename" or "(clean — no changed files)".
@@ -374,9 +173,45 @@ def _run_claude_advisory(
             omitted_paths=omitted_paths,
         )
     except RuntimeError as exc:
-        return [], f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
+        return f"⚠️ ADVISORY_ERROR: failed to build advisory prompt: {exc}"
     except Exception as exc:
-        return [], f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}"
+        return f"⚠️ ADVISORY_ERROR: unexpected error building prompt: {exc}"
+
+    return prompt, resolved_paths, changed_files_text
+
+
+def _run_claude_advisory(
+    repo_dir: pathlib.Path,
+    commit_message: str,
+    ctx: ToolContext,
+    goal: str = "",
+    scope: str = "",
+    paths: Optional[List[str]] = None,
+    drive_root: Optional[pathlib.Path] = None,
+) -> tuple[list, str]:
+    """Run the advisory review via Claude Agent SDK (read-only).
+
+    Returns (items, raw_result). raw_result starts with ⚠️ ADVISORY_ERROR: on failure.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set."
+
+    # Resolve model — single source of truth, honours CLAUDE_CODE_MODEL setting
+    from ouroboros.gateways.claude_code import resolve_claude_code_model
+    model = resolve_claude_code_model()
+
+    prepared = _prepare_advisory_prompt_context(
+        repo_dir,
+        commit_message,
+        goal=goal,
+        scope=scope,
+        paths=paths,
+        drive_root=drive_root,
+    )
+    if isinstance(prepared, str):
+        return [], prepared
+    prompt, resolved_paths, _changed_files_text = prepared
 
     prompt_chars = len(prompt)
     diag = _get_runtime_diagnostics(model, prompt_chars, resolved_paths)
@@ -441,6 +276,128 @@ def _run_claude_advisory(
             diag=diag,
         )
         log.error("Advisory SDK exception:\n%s", err_msg)
+        return [], err_msg
+
+
+def _run_llm_advisory(
+    repo_dir: pathlib.Path,
+    commit_message: str,
+    ctx: ToolContext,
+    goal: str = "",
+    scope: str = "",
+    paths: Optional[List[str]] = None,
+    drive_root: Optional[pathlib.Path] = None,
+) -> tuple[list, str]:
+    """Run advisory review through the configured openai-compatible LLM endpoint."""
+    compatible_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+    legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+    legacy_base_url = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+    if not (compatible_key or (legacy_key and legacy_base_url)):
+        return [], "⚠️ ADVISORY_ERROR: no openai-compatible advisory provider configured."
+
+    model = "openai-compatible::gpt-5.4"
+    for env_key in ("OUROBOROS_ADVISORY_REVIEW_MODEL", "OUROBOROS_SCOPE_REVIEW_MODEL", "OUROBOROS_MODEL"):
+        configured_model = str(os.environ.get(env_key, "") or "").strip()
+        if configured_model.startswith("openai-compatible::"):
+            model = configured_model
+            break
+    prepared = _prepare_advisory_prompt_context(
+        repo_dir,
+        commit_message,
+        goal=goal,
+        scope=scope,
+        paths=paths,
+        drive_root=drive_root,
+    )
+    if isinstance(prepared, str):
+        return [], prepared
+    prompt, resolved_paths, _changed_files_text = prepared
+
+    prompt_chars = len(prompt)
+    if prompt_chars > _ADVISORY_PROMPT_MAX_CHARS:
+        tokens_approx = max(1, prompt_chars // 4)
+        warning = (
+            f"⚠️ ADVISORY_SKIPPED: advisory prompt too large "
+            f"({prompt_chars:,} chars, ~{tokens_approx:,} tokens > "
+            f"{_ADVISORY_PROMPT_MAX_CHARS:,} char limit). "
+            f"Advisory review skipped — non-blocking. Consider splitting the commit."
+        )
+        log.warning("OpenAI-compatible advisory skipped — prompt too large: %d chars", prompt_chars)
+        return [], warning
+
+    log.info(
+        "OpenAI-compatible advisory call: model=%s prompt_chars=%d touched=%s",
+        model, prompt_chars, len(resolved_paths),
+    )
+
+    try:
+        from ouroboros.config import resolve_effort
+        from ouroboros.llm import LLMClient
+
+        msg, usage = LLMClient().chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an advisory code reviewer. Return ONLY a JSON array "
+                        "matching the requested schema. No markdown fences, no prose."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model=model,
+            reasoning_effort=resolve_effort("review"),
+            max_tokens=4096,
+            tool_choice="none",
+            temperature=0,
+        )
+        if usage:
+            try:
+                from ouroboros.pricing import emit_llm_usage_event, estimate_cost
+                from supervisor.state import update_budget_from_usage
+
+                cost = float(usage.get("cost") or 0.0)
+                if cost == 0.0:
+                    cost = estimate_cost(
+                        str(usage.get("resolved_model") or model),
+                        int(usage.get("prompt_tokens") or 0),
+                        int(usage.get("completion_tokens") or 0),
+                        int(usage.get("cached_tokens") or 0),
+                        int(usage.get("cache_write_tokens") or 0),
+                    )
+                event_queue = getattr(ctx, "event_queue", None)
+                if event_queue is not None:
+                    emit_llm_usage_event(
+                        event_queue,
+                        str(getattr(ctx, "task_id", "") or ""),
+                        model,
+                        usage,
+                        cost,
+                        category="review",
+                        provider="openai-compatible",
+                        source="advisory_pre_review",
+                    )
+                else:
+                    update_budget_from_usage(usage)
+            except Exception:
+                log.debug("Failed to emit advisory LLM usage event", exc_info=True)
+
+        content = msg.get("content") if isinstance(msg, dict) else ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item or ""))
+            raw_text = "\n".join(part for part in parts if part).strip()
+        else:
+            raw_text = str(content or "").strip()
+        items = _parse_advisory_output(raw_text)
+        return items, raw_text
+    except Exception as exc:
+        err_msg = f"⚠️ ADVISORY_ERROR: openai-compatible advisory failed: {type(exc).__name__}: {exc}"
+        log.error(err_msg, exc_info=True)
         return [], err_msg
 
 
@@ -533,7 +490,13 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
         ))
 
     update_state(drive_root, _mutate)
-    if "ANTHROPIC_API_KEY" in reason:
+    if "No advisory provider configured" in reason:
+        msg = (
+            "⚠️ No advisory provider is configured — advisory review skipped automatically. "
+            "Bypass has been durably audited in events.jsonl. "
+            "Set ANTHROPIC_API_KEY or openai-compatible credentials to enable advisory reviews."
+        )
+    elif "ANTHROPIC_API_KEY" in reason:
         msg = (
             "⚠️ ANTHROPIC_API_KEY is not set — advisory review skipped automatically. "
             "Bypass has been durably audited in events.jsonl. "
@@ -715,16 +678,22 @@ def _handle_advisory_pre_review(
     state = load_state(drive_root)
     task_id = str(getattr(ctx, "task_id", "") or "")
 
-    # Auto-bypass if Anthropic key is absent — audit it transparently
-    if not os.environ.get("ANTHROPIC_API_KEY", ""):
-        return _record_bypass(ctx, state, snapshot_hash, commit_message,
-                               "ANTHROPIC_API_KEY not set — auto-bypassed", task_id, drive_root,
-                               snapshot_paths=paths)
-
     # Handle explicit bypass
     if skip_advisory_pre_review:
         return _record_bypass(ctx, state, snapshot_hash, commit_message,
                                "explicit skip_advisory_pre_review=True", task_id, drive_root,
+                               snapshot_paths=paths)
+
+    has_anthropic_advisory = bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
+    compatible_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+    legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+    legacy_base_url = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+    has_llm_advisory = bool(compatible_key or (legacy_key and legacy_base_url))
+    if not has_anthropic_advisory and not has_llm_advisory:
+        reason = "No advisory provider configured — ANTHROPIC_API_KEY and openai-compatible credentials are absent"
+        ctx.emit_progress_fn(f"⚠️ Advisory pre-review skipped: {reason}")
+        return _record_bypass(ctx, state, snapshot_hash, commit_message,
+                               f"{reason} — auto-bypassed", task_id, drive_root,
                                snapshot_paths=paths)
 
     # Check if we already have a fresh run for this snapshot.
@@ -742,7 +711,8 @@ def _handle_advisory_pre_review(
         }, ensure_ascii=False, indent=2)
 
     # Run the advisory review
-    ctx.emit_progress_fn("Running advisory pre-review (Claude Code, read-only)...")
+    advisory_backend = "Claude Code" if has_anthropic_advisory else "openai-compatible"
+    ctx.emit_progress_fn(f"Running advisory pre-review ({advisory_backend}, read-only)...")
     changed_files = _get_changed_file_list(repo_dir, paths=paths)
 
     # Fail closed if git status itself is broken — proceeding with a broken file list
@@ -766,7 +736,26 @@ def _handle_advisory_pre_review(
     if version_sync_warning:
         ctx.emit_progress_fn(f"⚠️ Advisory preflight: {version_sync_warning}")
 
-    items, raw_result = _run_claude_advisory(repo_dir, commit_message, ctx, goal=goal, scope=scope, paths=paths, drive_root=drive_root)
+    if has_anthropic_advisory:
+        items, raw_result = _run_claude_advisory(
+            repo_dir,
+            commit_message,
+            ctx,
+            goal=goal,
+            scope=scope,
+            paths=paths,
+            drive_root=drive_root,
+        )
+    else:
+        items, raw_result = _run_llm_advisory(
+            repo_dir,
+            commit_message,
+            ctx,
+            goal=goal,
+            scope=scope,
+            paths=paths,
+            drive_root=drive_root,
+        )
 
     # Handle errors from the CLI
     if raw_result.startswith("⚠️ ADVISORY_ERROR"):

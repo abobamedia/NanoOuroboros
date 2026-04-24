@@ -9,6 +9,13 @@ OPENAI_DIRECT_DEFAULTS = {
     "fallback": "openai::gpt-5.4-mini",
 }
 
+OPENAI_COMPATIBLE_DIRECT_DEFAULTS = {
+    "main": "openai-compatible::gpt-5.5",
+    "code": "openai-compatible::gpt-5.5",
+    "light": "openai-compatible::gpt-5.4",
+    "fallback": "openai-compatible::gpt-5.4",
+}
+
 CLOUDRU_DIRECT_DEFAULTS = {
     "main": "cloudru::zai-org/GLM-4.7",
     "code": "cloudru::zai-org/GLM-4.7",
@@ -39,6 +46,10 @@ def migrate_model_value(provider: str, value: str) -> str:
     if provider == "openai":
         if text.startswith("openai/"):
             return f"openai::{text[len('openai/'):]}"
+        return text
+    if provider == "openai-compatible":
+        if text.startswith("openai-compatible/"):
+            return f"openai-compatible::{text[len('openai-compatible/'):]}"
         return text
     if provider == "anthropic":
         if text.startswith("anthropic::"):

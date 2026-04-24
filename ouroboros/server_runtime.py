@@ -8,6 +8,8 @@ from typing import Awaitable, Callable
 
 from ouroboros.provider_models import (
     ANTHROPIC_DIRECT_DEFAULTS,
+    CLOUDRU_DIRECT_DEFAULTS,
+    OPENAI_COMPATIBLE_DIRECT_DEFAULTS,
     OPENAI_DIRECT_DEFAULTS,
     migrate_model_value,
 )
@@ -21,11 +23,23 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
         "OUROBOROS_MODEL_LIGHT": OPENAI_DIRECT_DEFAULTS["light"],
         "OUROBOROS_MODEL_FALLBACK": OPENAI_DIRECT_DEFAULTS["fallback"],
     },
+    "openai-compatible": {
+        "OUROBOROS_MODEL": OPENAI_COMPATIBLE_DIRECT_DEFAULTS["main"],
+        "OUROBOROS_MODEL_CODE": OPENAI_COMPATIBLE_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_LIGHT": OPENAI_COMPATIBLE_DIRECT_DEFAULTS["light"],
+        "OUROBOROS_MODEL_FALLBACK": OPENAI_COMPATIBLE_DIRECT_DEFAULTS["fallback"],
+    },
     "anthropic": {
         "OUROBOROS_MODEL": ANTHROPIC_DIRECT_DEFAULTS["main"],
         "OUROBOROS_MODEL_CODE": ANTHROPIC_DIRECT_DEFAULTS["code"],
         "OUROBOROS_MODEL_LIGHT": ANTHROPIC_DIRECT_DEFAULTS["light"],
         "OUROBOROS_MODEL_FALLBACK": ANTHROPIC_DIRECT_DEFAULTS["fallback"],
+    },
+    "cloudru": {
+        "OUROBOROS_MODEL": CLOUDRU_DIRECT_DEFAULTS["main"],
+        "OUROBOROS_MODEL_CODE": CLOUDRU_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_LIGHT": CLOUDRU_DIRECT_DEFAULTS["light"],
+        "OUROBOROS_MODEL_FALLBACK": CLOUDRU_DIRECT_DEFAULTS["fallback"],
     },
 }
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
@@ -33,7 +47,9 @@ _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
         "OUROBOROS_MODEL_LIGHT": {"openai::gpt-4.1"},
         "OUROBOROS_MODEL_FALLBACK": {"openai::gpt-4.1"},
     },
+    "openai-compatible": {},
     "anthropic": {},
+    "cloudru": {},
 }
 _MODEL_LANE_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
@@ -66,13 +82,20 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
     has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
     has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_API_KEY"))
     has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
-    if has_openrouter or has_legacy_openai_base or has_compatible or has_cloudru:
+
+    if has_openrouter:
         return ""
-    if has_official_openai and not has_anthropic:
-        return "openai"
-    if has_anthropic and not has_official_openai:
-        return "anthropic"
-    return ""
+
+    providers = []
+    if has_official_openai and not has_legacy_openai_base:
+        providers.append("openai")
+    if has_anthropic:
+        providers.append("anthropic")
+    if has_compatible:
+        providers.append("openai-compatible")
+    if has_cloudru:
+        providers.append("cloudru")
+    return providers[0] if len(providers) == 1 else ""
 
 
 def _normalize_direct_review_models(settings: dict, provider: str) -> str:

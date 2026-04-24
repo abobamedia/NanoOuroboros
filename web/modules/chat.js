@@ -51,6 +51,10 @@ export function initChat({ ws, state, updateUnreadBadge }) {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></svg>
             <h2>Chat</h2>
             <div class="spacer"></div>
+            <div class="chat-activity-ticker" id="chat-activity-ticker" hidden title="Latest agent activity">
+                <span class="chat-activity-dot" aria-hidden="true"></span>
+                <span class="chat-activity-text" id="chat-activity-text">idle</span>
+            </div>
             <div class="chat-header-actions" id="chat-header-actions">
                 <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
                 <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
@@ -86,6 +90,8 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     const sendBtn = document.getElementById('chat-send');
     const statusBadge = document.getElementById('chat-status');
     const headerActions = document.getElementById('chat-header-actions');
+    const activityTicker = document.getElementById('chat-activity-ticker');
+    const activityText = document.getElementById('chat-activity-text');
     const attachBtn = document.getElementById('chat-attach');
     const fileInput = document.getElementById('chat-file-input');
     const attachmentPreview = document.getElementById('chat-attachment-preview');
@@ -129,6 +135,15 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     let welcomeShown = false;
     const liveCardRecords = new Map();
     const taskUiStates = new Map();
+    const activityState = {
+        active: false,
+        taskId: '',
+        phase: '',
+        round: null,
+        tool: '',
+        lastActivityMs: 0,
+        hideTimer: null,
+    };
     // Task ids that have been fully cleaned up (DOM removed, state freed).
     // Checked in syncHistory to prevent retired tasks from being recreated.
     const retiredTaskIds = new Set();
@@ -240,6 +255,104 @@ export function initChat({ ws, state, updateUnreadBadge }) {
         statusBadge.className = `status-badge ${kind}`;
         statusBadge.textContent = text;
     }
+
+    function parseActivityTime(evt = {}) {
+        const ts = evt.ts || evt.timestamp || '';
+        const parsed = Date.parse(ts);
+        return Number.isFinite(parsed) ? parsed : Date.now();
+    }
+
+    function formatActivityAge(ms) {
+        const ageSec = Math.max(0, Math.floor((Date.now() - Number(ms || 0)) / 1000));
+        if (ageSec < 2) return 'now';
+        if (ageSec < 60) return `${ageSec}s ago`;
+        const mins = Math.floor(ageSec / 60);
+        const secs = ageSec % 60;
+        return `${mins}m ${String(secs).padStart(2, '0')}s ago`;
+    }
+
+    function renderActivityTicker() {
+        if (!activityTicker || !activityText) return;
+        if (!activityState.lastActivityMs) {
+            activityTicker.hidden = true;
+            requestAnimationFrame(() => updateMessagesPadding());
+            return;
+        }
+        const ageMs = Date.now() - activityState.lastActivityMs;
+        if (!activityState.active && ageMs > 15000) {
+            activityTicker.hidden = true;
+            requestAnimationFrame(() => updateMessagesPadding());
+            return;
+        }
+        const parts = [];
+        if (activityState.round != null && activityState.round !== '') parts.push(`round ${activityState.round}`);
+        if (activityState.tool) parts.push(`tool: ${activityState.tool}`);
+        else if (activityState.phase) parts.push(activityState.phase);
+        parts.push(`last activity ${formatActivityAge(activityState.lastActivityMs)}`);
+        activityText.textContent = parts.join(' • ');
+        activityTicker.hidden = false;
+        activityTicker.dataset.active = activityState.active ? '1' : '0';
+        activityTicker.dataset.phase = activityState.phase || '';
+        requestAnimationFrame(() => updateMessagesPadding());
+    }
+
+    function scheduleActivityHide() {
+        if (activityState.hideTimer) clearTimeout(activityState.hideTimer);
+        activityState.hideTimer = setTimeout(renderActivityTicker, 16000);
+    }
+
+    function recordActivityFromLogEvent(evt) {
+        if (!evt) return;
+        const t = evt.type || evt.event || '';
+        const taskId = getLogTaskGroupId(evt) || evt.task_id || '';
+        const ts = parseActivityTime(evt);
+        const update = (patch = {}) => {
+            activityState.lastActivityMs = ts;
+            if (taskId) activityState.taskId = taskId;
+            Object.assign(activityState, patch);
+            renderActivityTicker();
+        };
+
+        if (t === 'task_started' || t === 'task_received' || t === 'context_building_started') {
+            update({ active: true, phase: 'preparing', tool: '' });
+            return;
+        }
+        if (t === 'context_building_finished') {
+            update({ active: true, phase: 'context ready', tool: '' });
+            return;
+        }
+        if (t === 'llm_round_started') {
+            update({ active: true, phase: 'thinking', round: evt.round || activityState.round, tool: '' });
+            return;
+        }
+        if (t === 'llm_round_finished' || t === 'llm_round' || t === 'llm_usage') {
+            update({ active: true, phase: 'thinking', round: evt.round || activityState.round });
+            return;
+        }
+        if (t === 'tool_call_started') {
+            update({ active: true, phase: 'working', tool: evt.tool || 'tool' });
+            return;
+        }
+        if (t === 'tool_call_finished') {
+            update({ active: true, phase: evt.is_error ? 'tool error' : 'working', tool: evt.tool || activityState.tool });
+            return;
+        }
+        if (t === 'tool_call_timeout' || t === 'tool_timeout' || t === 'llm_round_error' || t === 'llm_api_error') {
+            update({ active: false, phase: 'attention', tool: evt.tool || activityState.tool });
+            scheduleActivityHide();
+            return;
+        }
+        if (t === 'task_heartbeat') {
+            update({ active: true, phase: evt.phase || 'working' });
+            return;
+        }
+        if (t === 'task_done' || t === 'task_metrics_event' || t === 'task_eval') {
+            update({ active: false, phase: 'done', tool: '' });
+            scheduleActivityHide();
+        }
+    }
+
+    setInterval(renderActivityTicker, 1000);
 
     function syncHeaderControlState(data) {
         headerActions?.querySelectorAll('[data-chat-command]').forEach((button) => {
@@ -1168,9 +1281,12 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     // the absolute-positioned #chat-input-area overlay, so the last bubble is always
     // fully visible with a small buffer — no more excessive gap or hidden content.
     const inputArea = document.getElementById('chat-input-area');
+    const pageHeader = page.querySelector('.chat-page-header');
     function updateMessagesPadding() {
-        const h = inputArea ? inputArea.offsetHeight : 84;
-        messagesDiv.style.paddingBottom = (h + 16) + 'px';
+        const inputHeight = inputArea ? inputArea.offsetHeight : 84;
+        const headerHeight = pageHeader ? pageHeader.offsetHeight : 56;
+        messagesDiv.style.paddingBottom = (inputHeight + 16) + 'px';
+        messagesDiv.style.paddingTop = (headerHeight + 16) + 'px';
     }
 
     input.addEventListener('input', () => {
@@ -1298,6 +1414,7 @@ export function initChat({ ws, state, updateUnreadBadge }) {
     ws.on('log', (msg) => {
         if (!msg?.data) return;
         updateLiveCardFromLogEvent(msg.data);
+        recordActivityFromLogEvent(msg.data);
     });
 
     ws.on('outbound_sent', (evt) => {

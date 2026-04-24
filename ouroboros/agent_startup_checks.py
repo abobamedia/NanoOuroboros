@@ -18,6 +18,7 @@ from typing import Any, Dict, Tuple
 from ouroboros.utils import utc_now_iso, read_text, append_jsonl
 
 log = logging.getLogger(__name__)
+_AUTO_RESCUE_SKIP_LOGGED_REPOS: set[str] = set()
 
 
 def _is_stable_release_tag(tag: str) -> bool:
@@ -54,10 +55,16 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
         if dirty_files:
             auto_committed = False
             if not _startup_auto_rescue_enabled(env):
-                log.warning(
+                repo_key = str(getattr(env, "repo_dir", "") or "")
+                message = (
                     "Uncommitted changes detected on startup; skipping auto-rescue commit "
                     "outside launcher-managed mode"
                 )
+                if repo_key not in _AUTO_RESCUE_SKIP_LOGGED_REPOS:
+                    _AUTO_RESCUE_SKIP_LOGGED_REPOS.add(repo_key)
+                    log.debug(message)
+                else:
+                    log.debug("%s (duplicate suppressed)", message)
                 return {
                     "status": "warning",
                     "files": dirty_files[:20],

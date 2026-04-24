@@ -138,6 +138,20 @@ def test_python_m_pytest_is_deterministically_whitelisted():
     )
 
 
+def test_project_venv_python_m_pytest_is_deterministically_whitelisted(tmp_path, monkeypatch):
+    from ouroboros.safety import _is_whitelisted
+
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_REPO_DIR", str(tmp_path))
+
+    assert _is_whitelisted(
+        "run_shell",
+        {"cmd": [str(venv_python), "-m", "pytest", "tests/test_scope_review.py", "-q"]},
+    )
+
+
 def test_string_python_m_pytest_is_deterministically_whitelisted():
     from ouroboros.safety import _is_whitelisted
 

@@ -128,6 +128,44 @@ def test_get_review_models_falls_back_to_main_in_openai_only_mode(monkeypatch):
     assert models == ["openai::gpt-5.4", "openai::gpt-5.4", "openai::gpt-5.4"]
 
 
+def test_get_review_models_falls_back_to_main_in_openai_compatible_only_mode(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-compatible")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai-compatible::gpt-5.4")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai/gpt-5.4,google/gemini-3.1-pro-preview,anthropic/claude-opus-4.6",
+    )
+
+    models = get_review_models()
+
+    assert models == ["openai-compatible::gpt-5.4"] * 3
+
+
+def test_get_review_models_preserves_explicit_openai_compatible_list(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-compatible")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai-compatible::gpt-5.5")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai-compatible/gpt-5.5,openai-compatible::gpt-5.4",
+    )
+
+    models = get_review_models()
+
+    assert models == ["openai-compatible::gpt-5.5", "openai-compatible::gpt-5.4"]
+
+
 def test_get_review_models_preserves_explicit_official_openai_list(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

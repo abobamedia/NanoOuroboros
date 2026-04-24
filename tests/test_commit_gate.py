@@ -618,7 +618,7 @@ def test_repo_commit_schema_has_skip_advisory_param():
 
 
 def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
-    """advisory_pre_review must auto-bypass with audit when ANTHROPIC_API_KEY is absent."""
+    """advisory_pre_review must auto-bypass with audit when no advisory provider exists."""
     import json
     import subprocess
     adv_mod = _get_advisory_module()
@@ -633,6 +633,10 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
     subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
     progress_calls = []
 
@@ -650,7 +654,7 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
 
     # Must be bypassed, not errored
     assert result["status"] == "bypassed"
-    assert "ANTHROPIC_API_KEY" in result["bypass_reason"]
+    assert "No advisory provider configured" in result["bypass_reason"]
 
     # Must create a fresh advisory state (bypassed counts as fresh for gate)
     state = rs_mod.load_state(drive_root)
@@ -663,7 +667,64 @@ def test_advisory_auto_bypass_on_missing_key(tmp_path, monkeypatch):
     events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
     bypass_events = [e for e in events if e.get("type") == "advisory_pre_review_bypassed"]
     assert len(bypass_events) == 1
-    assert "ANTHROPIC_API_KEY" in bypass_events[0]["bypass_reason"]
+    assert "No advisory provider configured" in bypass_events[0]["bypass_reason"]
+
+
+def test_advisory_uses_openai_compatible_fallback_without_anthropic(tmp_path, monkeypatch):
+    """openai-compatible credentials should run advisory instead of auto-bypassing."""
+    import json
+    import subprocess
+    adv_mod = _get_advisory_module()
+    rs_mod = _get_review_state_module()
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (drive_root / "state").mkdir()
+    (drive_root / "logs").mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo_dir), capture_output=True)
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-compatible")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
+
+    called = {}
+
+    def fake_llm_advisory(repo_dir_arg, commit_message, ctx, **kwargs):
+        called["repo_dir"] = repo_dir_arg
+        called["commit_message"] = commit_message
+        return ([{
+            "item": "tests_affected",
+            "verdict": "PASS",
+            "severity": "advisory",
+            "reason": "no code changes",
+        }], '[{"item":"tests_affected","verdict":"PASS","severity":"advisory","reason":"no code changes"}]')
+
+    monkeypatch.setattr(adv_mod, "_run_llm_advisory", fake_llm_advisory)
+
+    class FakeCtx:
+        pass
+    ctx = FakeCtx()
+    ctx.repo_dir = str(repo_dir)
+    ctx.drive_root = str(drive_root)
+    ctx.task_id = "compat-advisory-task"
+    ctx.drive_logs = lambda: drive_root / "logs"
+    ctx.emit_progress_fn = lambda msg: None
+
+    result_raw = adv_mod._handle_advisory_pre_review(ctx, commit_message="test commit")
+    result = json.loads(result_raw)
+
+    assert result["status"] == "fresh"
+    assert called["repo_dir"] == repo_dir
+    assert called["commit_message"] == "test commit"
+    state = rs_mod.load_state(drive_root)
+    assert state.latest() is not None
+    assert state.latest().status == "fresh"
+    events_path = drive_root / "logs" / "events.jsonl"
+    if events_path.exists():
+        events = [json.loads(l) for l in events_path.read_text().splitlines() if l.strip()]
+        assert not [e for e in events if e.get("type") == "advisory_pre_review_bypassed"]
 
 
 def test_advisory_prompt_contains_blocking_history_when_blocked(tmp_path):
@@ -996,4 +1057,3 @@ def test_advisory_prompt_contains_obligation_targeting_instructions(tmp_path):
         assert "will NOT resolve" in prompt or "will not resolve" in prompt.lower(), (
             "Prompt must warn that generic item-name PASS won't resolve all same-item obligations"
         )
-
