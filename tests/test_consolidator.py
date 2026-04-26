@@ -1,5 +1,6 @@
 """Tests for ouroboros.consolidator (block-wise system)."""
 import json
+import logging
 import pathlib
 import pytest
 from unittest.mock import MagicMock
@@ -8,6 +9,8 @@ from ouroboros.consolidator import (
     should_consolidate,
     consolidate,
     migrate_dialogue_summary_to_blocks,
+    _create_block_summary,
+    _resolve_consolidation_model,
     _load_meta,
     _save_meta,
     _count_lines,
@@ -65,7 +68,8 @@ def test_should_consolidate_respects_offset(tmp_paths):
     assert should_consolidate(meta_path, chat_path) is False
 
 
-def test_consolidate_creates_block(tmp_paths):
+def test_consolidate_creates_block(tmp_paths, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     chat_path, blocks_path, meta_path = tmp_paths
     _write_chat_entries(chat_path, BLOCK_SIZE + 5)
 
@@ -87,6 +91,53 @@ def test_consolidate_creates_block(tmp_paths):
 
     meta = _load_meta(meta_path)
     assert meta["last_consolidated_offset"] == BLOCK_SIZE
+
+
+def test_consolidation_model_falls_back_to_configured_direct_provider(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "compat-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai-compatible::gpt-5.4-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai-compatible::gpt-5.5")
+
+    assert _resolve_consolidation_model() == "openai-compatible::gpt-5.4-mini"
+
+
+def test_consolidation_model_skips_compatible_without_base_url(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "compat-key")
+    monkeypatch.delenv("OPENAI_COMPATIBLE_BASE_URL", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai-compatible::gpt-5.4-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai-compatible::gpt-5.5")
+
+    assert _resolve_consolidation_model() is None
+
+
+def test_block_summary_auth_failure_is_fail_soft(monkeypatch, caplog):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "bad-openrouter-key")
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openrouter::google/gemini-3-flash-preview")
+
+    mock_llm = MagicMock()
+    mock_llm.chat.side_effect = RuntimeError(
+        "AuthenticationError: Error code: 401 - {'error': {'message': 'No cookie auth credentials found'}}"
+    )
+
+    caplog.set_level(logging.INFO, logger="ouroboros.consolidator")
+    content, usage = _create_block_summary(
+        mock_llm,
+        messages_text="User: hello",
+        first_ts="2026-04-26T13:00:00+00:00",
+        last_ts="2026-04-26T13:00:01+00:00",
+        identity_text="",
+        message_count=1,
+    )
+
+    assert content == ""
+    assert usage == {"cost": 0}
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert "Skipping consolidation LLM call" in caplog.text
 
 
 def test_consolidate_not_enough_messages(tmp_paths):

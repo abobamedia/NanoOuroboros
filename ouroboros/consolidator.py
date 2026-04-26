@@ -41,6 +41,104 @@ CONSOLIDATION_REASONING_EFFORT = "medium"
 MAX_SUMMARY_CHARS = 90000                 # Hard cap preserved from old system
 
 
+def _parse_model_provider(model: str) -> str:
+    """Return provider identity for a configured model value."""
+    model_name = str(model or "").strip()
+    for prefix, provider in (
+        ("openai::", "openai"),
+        ("anthropic::", "anthropic"),
+        ("cloudru::", "cloudru"),
+        ("openai-compatible::", "openai-compatible"),
+        ("openrouter::", "openrouter"),
+    ):
+        if model_name.startswith(prefix):
+            return provider
+    return "openrouter"
+
+
+def _has_provider_credentials(provider: str) -> bool:
+    """Whether a decorative consolidation call can use this provider now."""
+    if provider == "openai":
+        return bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
+    if provider == "anthropic":
+        return bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
+    if provider == "cloudru":
+        return bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    if provider == "openai-compatible":
+        compatible_key = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+        compatible_base = str(os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
+        legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+        legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+        return bool((compatible_key and compatible_base) or (legacy_key and legacy_base))
+    return bool(str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip())
+
+
+def _resolve_consolidation_model(default_model: str = CONSOLIDATION_MODEL) -> Optional[str]:
+    """Choose an available model for background memory consolidation.
+
+    The historic default is an OpenRouter model.  If OpenRouter is not
+    configured, use the first configured runtime slot instead of making a
+    decorative background call that fails with a noisy 401 stack trace.
+    """
+    if _has_provider_credentials(_parse_model_provider(default_model)):
+        return default_model
+
+    for env_name in (
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+    ):
+        candidate = str(os.environ.get(env_name, "") or "").strip()
+        if candidate and _has_provider_credentials(_parse_model_provider(candidate)):
+            return candidate
+    return None
+
+
+def _is_auth_configuration_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "401" in text and (
+        "No cookie auth credentials found" in text
+        or "invalid_api_key" in text
+        or "AuthenticationError" in type(exc).__name__
+    )
+
+
+def _call_consolidation_model(
+    llm_client: Any,
+    prompt: str,
+    *,
+    max_tokens: int = 4096,
+) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+    """Call the consolidation model, failing softly for optional memory work.
+
+    Returns (message, usage, skipped).  Authentication/configuration failures
+    are expected when only a direct provider is configured but the default
+    consolidation model still points at OpenRouter.
+    """
+    model = _resolve_consolidation_model()
+    if not model:
+        log.info(
+            "Skipping consolidation LLM call: no credentials for %s or fallback runtime models",
+            CONSOLIDATION_MODEL,
+        )
+        return {"content": ""}, {"cost": 0}, True
+
+    try:
+        msg, usage = llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            reasoning_effort="low",
+            max_tokens=max_tokens,
+        )
+        return msg, usage, False
+    except Exception as exc:
+        if _is_auth_configuration_error(exc):
+            log.info("Skipping consolidation LLM call after auth failure: %s", exc)
+            return {"content": ""}, {"cost": 0}, True
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Block-wise chat consolidation
 # ---------------------------------------------------------------------------
@@ -273,13 +371,9 @@ Create a detailed episodic memory entry from these {message_count} messages.
 """
 
     try:
-        response_msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            tools=None,
-            reasoning_effort="low",
-            max_tokens=4096,
-        )
+        response_msg, usage, skipped = _call_consolidation_model(llm_client, prompt, max_tokens=4096)
+        if skipped:
+            return "", usage
         return response_msg.get("content", ""), usage
     except Exception as e:
         log.error("Block summary LLM call failed: %s", e, exc_info=True)
@@ -321,13 +415,9 @@ Write as Ouroboros (first person). Aim for 30-40% of original length.
 """
 
     try:
-        msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            tools=None,
-            reasoning_effort="low",
-            max_tokens=4096,
-        )
+        msg, usage, skipped = _call_consolidation_model(llm_client, prompt, max_tokens=4096)
+        if skipped:
+            return None, usage
         content = msg.get("content", "")
         if not content or not content.strip():
             log.warning("Era compression returned empty — keeping original blocks (Bible P1)")
@@ -619,12 +709,9 @@ Respond with JSON only (no fences):
 """
 
     try:
-        msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            reasoning_effort="low",
-            max_tokens=4096,
-        )
+        msg, usage, skipped = _call_consolidation_model(llm_client, prompt, max_tokens=4096)
+        if skipped:
+            return usage
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -724,12 +811,9 @@ Respond with JSON only (no fences):
 {{"knowledge_entries": [{{"topic": "name", "content": "text"}}], "compressed_scratchpad": "new scratchpad"}}
 """
 
-        msg, usage = llm_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=CONSOLIDATION_MODEL,
-            reasoning_effort="low",
-            max_tokens=4096,
-        )
+        msg, usage, skipped = _call_consolidation_model(llm_client, prompt, max_tokens=4096)
+        if skipped:
+            return usage
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()

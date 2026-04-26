@@ -73,7 +73,8 @@ def test_should_consolidate_chat_blocks_alias(tmp_path):
     assert should_consolidate_chat_blocks(meta_path, chat_path) is True
 
 
-def test_consolidate_chat_alias_creates_block(tmp_path):
+def test_consolidate_chat_alias_creates_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     from ouroboros.consolidator import consolidate_chat_blocks, _load_meta, _load_blocks, BLOCK_SIZE
     chat_path = tmp_path / 'chat.jsonl'
     blocks_path = tmp_path / 'dialogue_blocks.json'

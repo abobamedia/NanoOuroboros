@@ -1,4 +1,4 @@
-# Ouroboros v4.18.8 — Architecture & Reference
+# Ouroboros v4.18.9 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -676,7 +676,7 @@ the constitutional guard is that the file itself must remain non-deletable.
 
 - Triggered after each task completion (non-blocking, runs in a daemon thread)
 - Reads unprocessed entries from `chat.jsonl` in BLOCK_SIZE (100) message chunks
-- Calls LLM (Gemini Flash) to create summary blocks stored in `dialogue_blocks.json`
+- Calls LLM to create summary blocks stored in `dialogue_blocks.json`. The default model is Gemini Flash via OpenRouter, but if OpenRouter credentials are absent/invalid the consolidator falls back to configured direct-provider runtime model slots (light/fallback/main/code) or skips auth-only failures without an ERROR stack trace because this is optional background memory work.
 - **Era compression**: when block count exceeds MAX_SUMMARY_BLOCKS (10), oldest blocks
   compressed into single "era summary" (30-40% of original length)
 - **Auto-migration**: legacy `dialogue_summary.md` episodes auto-migrated to blocks
