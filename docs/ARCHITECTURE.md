@@ -1,4 +1,4 @@
-# Ouroboros v4.18.6 — Architecture & Reference
+# Ouroboros v4.18.7 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -440,6 +440,7 @@ Each iteration (0.5s sleep):
 3. Drain event queue (worker→supervisor events via multiprocessing.Queue)
 4. `enforce_task_timeouts()` — soft/hard timeout handling
 5. `enqueue_evolution_task_if_needed()` — auto-queue evolution if enabled
+   - Evolution circuit breaker success now uses landed repo commits as the primary signal (task start HEAD != task end HEAD) and cost above `OUROBOROS_EVO_COST_THRESHOLD` as a secondary signal; tracked failures include explicit reasons (`low_rounds`, `low_cost_no_commit`, `no_commit`).
 6. `assign_tasks()` — match pending tasks to free workers
 7. `persist_queue_snapshot()` — save queue state for crash recovery
 8. Poll `LocalChatBridge` inbox for user messages

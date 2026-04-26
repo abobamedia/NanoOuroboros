@@ -30,6 +30,43 @@ log = logging.getLogger(__name__)
 
 _PARENT_CONTEXT_MARKER = "[BEGIN_PARENT_CONTEXT"
 _PARENT_CONTEXT_END = "[END_PARENT_CONTEXT]"
+_EVOLUTION_MEANINGFUL_ROUNDS = 3
+
+
+def _get_current_repo_head(ctx: Any) -> str:
+    """Best-effort current git HEAD for evolution success tracking."""
+    try:
+        import subprocess as sp
+
+        result = sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ctx.REPO_DIR),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        log.debug("Failed to read current repo HEAD for evolution tracking", exc_info=True)
+        return ""
+
+
+def _evolution_failure_reason(
+    *,
+    commit_landed: bool,
+    has_commit_evidence: bool,
+    cost: float,
+    rounds: int,
+    cost_threshold: float,
+) -> str:
+    if commit_landed or (cost > cost_threshold and rounds >= 1):
+        return ""
+    if rounds < _EVOLUTION_MEANINGFUL_ROUNDS:
+        return "low_rounds"
+    if has_commit_evidence and cost <= cost_threshold:
+        return "low_cost_no_commit"
+    return "no_commit"
 
 
 def _extract_task_description_and_context(task: Dict[str, Any]) -> tuple[str, str]:
@@ -217,23 +254,34 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     except Exception:
         log.warning("Failed to log task_done to events.jsonl", exc_info=True)
 
-    # Track evolution task success/failure for circuit breaker
+    # Track evolution task success/failure for circuit breaker.
+    # Primary success signal is now a landed repo commit (HEAD changed during
+    # the task); cost remains a secondary sanity signal for non-commit work.
     if task_type == "evolution":
         st = ctx.load_state()
-        # Check if task produced meaningful output (successful evolution)
-        # A successful evolution should have:
-        # - Reasonable cost (not near-zero, indicating actual work)
-        # - Multiple rounds (not just 1 retry)
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
-
         evo_cost_threshold = float(os.environ.get("OUROBOROS_EVO_COST_THRESHOLD", "0.10"))
-        if cost > evo_cost_threshold and rounds >= 1:
-            # Success: reset failure counter
+
+        running_meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
+        if not isinstance(running_meta, dict):
+            running_meta = {}
+        start_sha = str(running_meta.get("start_git_sha") or "").strip()
+        end_sha = _get_current_repo_head(ctx)
+        has_commit_evidence = bool(start_sha and end_sha)
+        commit_landed = bool(has_commit_evidence and start_sha != end_sha)
+        reason = _evolution_failure_reason(
+            commit_landed=commit_landed,
+            has_commit_evidence=has_commit_evidence,
+            cost=cost,
+            rounds=rounds,
+            cost_threshold=evo_cost_threshold,
+        )
+
+        if not reason:
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)
         else:
-            # Likely failure (empty response or minimal work)
             failures = int(st.get("evolution_consecutive_failures") or 0) + 1
             st["evolution_consecutive_failures"] = failures
             ctx.save_state(st)
@@ -243,9 +291,14 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "evolution_task_failure_tracked",
                     "task_id": task_id,
+                    "reason": reason,
                     "consecutive_failures": failures,
                     "cost_usd": cost,
+                    "cost_threshold": evo_cost_threshold,
                     "rounds": rounds,
+                    "start_git_sha": start_sha,
+                    "end_git_sha": end_sha,
+                    "commit_landed": commit_landed,
                 },
             )
 

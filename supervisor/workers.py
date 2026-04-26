@@ -587,14 +587,30 @@ def assign_tasks() -> None:
                     queue.persist_queue_snapshot(reason="evolution_dropped_budget")
                     continue
                 task = PENDING.pop(chosen_idx)
-                w.busy_task_id = task["id"]
-                w.in_q.put(task)
                 now_ts = time.time()
+                start_git_sha = ""
+                if str(task.get("type") or "") == "evolution":
+                    try:
+                        import subprocess as sp
+
+                        start_git_sha = sp.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=str(REPO_DIR),
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            check=True,
+                        ).stdout.strip()
+                    except Exception:
+                        log.debug("Failed to capture evolution start git SHA", exc_info=True)
+                w.busy_task_id = task["id"]
                 RUNNING[task["id"]] = {
                     "task": dict(task), "worker_id": w.wid,
                     "started_at": now_ts, "last_heartbeat_at": now_ts,
                     "soft_sent": False, "attempt": int(task.get("_attempt") or 1),
+                    "start_git_sha": start_git_sha,
                 }
+                w.in_q.put(task)
                 task_type = str(task.get("type") or "")
                 if task_type in ("evolution", "review"):
                     st = load_state()

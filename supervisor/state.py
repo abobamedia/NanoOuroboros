@@ -18,6 +18,9 @@ from typing import Any, Dict, Optional
 log = logging.getLogger(__name__)
 
 
+_EVOLUTION_FAILURE_LOGIC_VERSION = 2
+
+
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
@@ -148,6 +151,13 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_drift_pct", None)
     st.setdefault("budget_drift_alert", False)
     st.setdefault("evolution_consecutive_failures", 0)
+    failure_logic_version = int(st.get("evolution_failure_logic_version") or 0)
+    if failure_logic_version < _EVOLUTION_FAILURE_LOGIC_VERSION:
+        # One-time cleanup for stale counters produced by the old cost-only
+        # evolution success heuristic.  The new logic records commit-based
+        # success plus explicit failure reasons before incrementing again.
+        st["evolution_consecutive_failures"] = 0
+        st["evolution_failure_logic_version"] = _EVOLUTION_FAILURE_LOGIC_VERSION
     st.setdefault("bg_consciousness_enabled", False)
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):
@@ -177,8 +187,9 @@ def _load_state_unlocked() -> Dict[str, Any]:
         _save_state_unlocked(st)
         return st
 
+    before_defaults = dict(st_obj)
     st = ensure_state_defaults(st_obj)
-    if recovered:
+    if recovered or st != before_defaults:
         _save_state_unlocked(st)
     return st
 
