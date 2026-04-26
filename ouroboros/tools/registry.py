@@ -212,7 +212,7 @@ class ToolRegistry:
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_rollback", "github", "health",
         "knowledge", "memory_tools", "plan_review", "review", "search", "shell",
-        "tool_discovery", "vision",
+        "tool_discovery", "url_ingest", "vision",
     ]
 
     def _load_modules(self) -> None:

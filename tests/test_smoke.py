@@ -132,6 +132,8 @@ EXPECTED_TOOLS = [
     "plan_task",
     # CI
     "run_ci_tests",
+    # URL ingestion (Drive folder/file + plain HTTP into sandboxed workspace)
+    "read_url",
 ]
 
 
