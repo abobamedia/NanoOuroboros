@@ -319,10 +319,11 @@ class TestScopeReviewModule:
         assert "SCOPE_REVIEW_BLOCKED" in source
         assert "fail" in source.lower() or "block" in source.lower()
 
-    def test_scope_review_uses_opus(self):
+    def test_scope_review_uses_opus(self, monkeypatch):
         mod = _get_module("ouroboros.tools.scope_review")
         assert "claude-opus-4.6" in mod._SCOPE_MODEL_DEFAULT
-        # Also verify the getter works
+        monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_MODEL", raising=False)
+        # Also verify the getter works when runtime env does not override it.
         assert "claude-opus-4.6" in mod._get_scope_model()
 
     def test_scope_review_model_configurable_via_env(self):

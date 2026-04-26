@@ -85,28 +85,21 @@ class TestBuildReviewPack:
 
 class TestIsReviewAvailable:
     def test_openrouter(self):
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True):
             available, model = is_review_available()
         assert available is True
         assert model == "openai/gpt-5.5-pro"
 
     def test_openai(self):
         env = {"OPENAI_API_KEY": "sk-test"}
-        with mock.patch.dict(os.environ, env, clear=False):
-            # Ensure OPENROUTER_API_KEY and OPENAI_BASE_URL are not set
-            os.environ.pop("OPENROUTER_API_KEY", None)
-            os.environ.pop("OPENAI_BASE_URL", None)
-            os.environ.pop("OPENAI_COMPATIBLE_API_KEY", None)
+        with mock.patch.dict(os.environ, env, clear=True):
             available, model = is_review_available()
         assert available is True
         assert model == "openai::gpt-5.5-pro"
 
     def test_openai_compatible(self):
         env = {"OPENAI_COMPATIBLE_API_KEY": "sk-compatible"}
-        with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("OPENROUTER_API_KEY", None)
-            os.environ.pop("OPENAI_API_KEY", None)
-            os.environ.pop("OPENAI_BASE_URL", None)
+        with mock.patch.dict(os.environ, env, clear=True):
             available, model = is_review_available()
         assert available is True
         assert model == "openai-compatible::gpt-5.5"

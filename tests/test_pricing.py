@@ -81,6 +81,11 @@ class TestEstimateCost:
     def test_gpt_54_mini_static_pricing_is_registered(self):
         assert MODEL_PRICING_STATIC["openai/gpt-5.4-mini"] == (0.75, 0.075, 4.50)
 
+    def test_openai_compatible_models_use_openai_pricing_alias(self):
+        cost = estimate_cost("openai-compatible/gpt-5.5", 1000, 500)
+        assert cost > 0
+        assert cost == estimate_cost("openai/gpt-5.5", 1000, 500)
+
 
 # --- infer_api_key_type ---
 

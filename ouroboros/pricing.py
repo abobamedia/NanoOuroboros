@@ -32,6 +32,8 @@ MODEL_PRICING_STATIC = {
     "openai/o3-pro": (20.0, 1.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
+    "openai/gpt-5.5": (1.75, 0.175, 14.0),
+    "openai/gpt-5.4": (1.75, 0.175, 14.0),
     "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
@@ -83,18 +85,26 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                   cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
     model_pricing = get_pricing()
-    # Try exact match first
-    pricing = model_pricing.get(model)
-    if not pricing:
-        # Try longest prefix match
+    normalized = _normalize_model_identity(model)
+    lookup_names = [str(model or "").strip(), normalized]
+    if normalized.startswith("openai-compatible/"):
+        lookup_names.append(f"openai/{normalized[len('openai-compatible/'):]}")
+    if normalized.startswith("cloudru/"):
+        lookup_names.append(normalized[len("cloudru/"):])
+    pricing = None
+    for lookup_name in tuple(dict.fromkeys(name for name in lookup_names if name)):
+        pricing = model_pricing.get(lookup_name)
+        if pricing:
+            break
         best_match = None
         best_length = 0
         for key, val in model_pricing.items():
-            if model and model.startswith(key):
-                if len(key) > best_length:
-                    best_match = val
-                    best_length = len(key)
-        pricing = best_match
+            if lookup_name.startswith(key) and len(key) > best_length:
+                best_match = val
+                best_length = len(key)
+        if best_match:
+            pricing = best_match
+            break
     if not pricing:
         return 0.0
     input_price, cached_price, output_price = pricing
