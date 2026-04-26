@@ -5,6 +5,7 @@ No imports from other ouroboros.tools modules to avoid circular deps.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -308,6 +309,131 @@ def build_advisory_changed_context(
     if not touched_pack.strip():
         touched_pack = "(no touched files)"
     return resolved_paths, touched_pack, omitted
+
+
+def _module_name_for_repo_path(rel_path: str) -> str | None:
+    """Return a Python import module name for a repo-relative .py path."""
+    path = Path(rel_path)
+    if path.suffix != ".py":
+        return None
+    parts = list(path.with_suffix("").parts)
+    if not parts:
+        return None
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    if not parts:
+        return None
+    return ".".join(parts)
+
+
+def _import_refs_from_python_file(path: Path) -> set[str]:
+    """Extract absolute import module references from one Python file."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return set()
+
+    refs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name:
+                    refs.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            module = node.module or ""
+            if module:
+                refs.add(module)
+            for alias in node.names:
+                if module and alias.name != "*":
+                    refs.add(f"{module}.{alias.name}")
+    return refs
+
+
+def _local_python_module_index(repo_dir: Path) -> dict[str, str]:
+    """Map import module names to repo-relative Python file paths."""
+    result = subprocess.run(
+        ["git", "ls-files", "*.py"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        err = result.stderr.strip()[:200] if result.stderr else "unknown error"
+        raise RuntimeError(
+            f"build_touched_with_local_deps_pack: git ls-files failed (exit {result.returncode}): {err}"
+        )
+
+    index: dict[str, str] = {}
+    for rel in result.stdout.splitlines():
+        module_name = _module_name_for_repo_path(rel)
+        if module_name:
+            index[module_name] = rel
+    return index
+
+
+def _resolve_local_imports(import_refs: set[str], module_index: dict[str, str]) -> set[str]:
+    """Resolve imported module references to local repo module paths."""
+    resolved: set[str] = set()
+    for ref in import_refs:
+        current = ref
+        while current:
+            rel_path = module_index.get(current)
+            if rel_path:
+                resolved.add(rel_path)
+                break
+            if "." not in current:
+                break
+            current = current.rsplit(".", 1)[0]
+    return resolved
+
+
+def build_touched_with_local_deps_pack(
+    repo_dir: Path,
+    touched_paths: list[str],
+) -> tuple[str, list[str], list[str]]:
+    """Build a touched-file pack expanded with one-hop local Python dependencies.
+
+    The expansion is intentionally shallow and deterministic:
+    - include each touched file;
+    - for touched Python files, include local modules they import;
+    - include local Python files that import any touched module root.
+
+    It does not recurse into dependencies-of-dependencies, so cycles cannot loop.
+    Non-Python touched files are included as-is and do not trigger dependency expansion.
+
+    Returns (pack_text, omitted_paths, dependency_paths). dependency_paths excludes
+    the original touched paths and is sorted for stable prompts/tests.
+    """
+    module_index = _local_python_module_index(repo_dir)
+    touched_unique = list(dict.fromkeys(touched_paths or []))
+    touched_set = set(touched_unique)
+
+    touched_modules: set[str] = set()
+    imported_refs: set[str] = set()
+    for rel in touched_unique:
+        module_name = _module_name_for_repo_path(rel)
+        if module_name:
+            touched_modules.add(module_name)
+            imported_refs.update(_import_refs_from_python_file(repo_dir / rel))
+
+    deps = _resolve_local_imports(imported_refs, module_index)
+
+    # Reverse one-hop: include local files that import a touched module.
+    if touched_modules:
+        for module_name, rel_path in module_index.items():
+            if rel_path in touched_set:
+                continue
+            file_imports = _import_refs_from_python_file(repo_dir / rel_path)
+            if _resolve_local_imports(file_imports, module_index).intersection(touched_set):
+                deps.add(rel_path)
+
+    dependency_paths = sorted(p for p in deps if p not in touched_set)
+    pack_paths = touched_unique + dependency_paths
+    pack, omitted = build_touched_file_pack(repo_dir, pack_paths)
+    return pack, omitted, dependency_paths
 
 
 def build_blocking_findings_json_section(

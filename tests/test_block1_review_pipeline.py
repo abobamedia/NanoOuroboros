@@ -483,11 +483,12 @@ class TestFullRepoPackFailClosed:
             with pytest.raises(RuntimeError, match="git ls-files failed"):
                 rh.build_full_repo_pack(tmp_path)
 
-    def test_scope_gather_packs_propagates_git_failure(self, tmp_path):
-        """scope_review._gather_scope_packs propagates RuntimeError from build_full_repo_pack."""
+    def test_scope_gather_packs_propagates_git_failure(self, tmp_path, monkeypatch):
+        """scope_review._gather_scope_packs propagates RuntimeError from full-repo strategy."""
         import subprocess
         from unittest.mock import patch
         sr = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", raising=False)
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"],
                        cwd=str(tmp_path), capture_output=True)
@@ -500,14 +501,20 @@ class TestFullRepoPackFailClosed:
             raise RuntimeError("build_full_repo_pack: git ls-files failed (exit 128): fatal")
         with patch.object(sr, "build_full_repo_pack", side_effect=fake_full_pack):
             with pytest.raises(RuntimeError, match="git ls-files failed"):
-                sr._gather_scope_packs(tmp_path, ["a.py"])
+                sr._gather_scope_packs(
+                    tmp_path,
+                    ["a.py"],
+                    model="anthropic::claude-opus-4.6",
+                )
 
-    def test_run_scope_review_blocks_on_repo_pack_git_failure(self, tmp_path):
-        """run_scope_review must fail closed when build_full_repo_pack raises RuntimeError."""
+    def test_run_scope_review_blocks_on_repo_pack_git_failure(self, tmp_path, monkeypatch):
+        """run_scope_review must fail closed when full-repo pack raises RuntimeError."""
         import subprocess
         from unittest.mock import patch
 
         sr = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODEL", "anthropic::claude-opus-4.6")
+        monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", raising=False)
         subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"],
                        cwd=str(tmp_path), capture_output=True)

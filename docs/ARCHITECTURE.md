@@ -1,4 +1,4 @@
-# Ouroboros v4.18.7 — Architecture & Reference
+# Ouroboros v4.18.8 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -562,7 +562,12 @@ backward compatibility but is not the runtime authority.
   `docs/CHECKLISTS.md`) plus a blocking scope review that runs in parallel on the
   same staged snapshot. `Blocking` mode keeps critical findings as hard gates;
   `Advisory` mode surfaces the same findings as warnings and lets the commit
-  continue. Review history carried across blocking iterations. Quorum: at least
+  continue. Scope review is provider-aware: Anthropic/OpenRouter keep the full-repo
+  context pack, while OpenAI-compatible models (or `OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY=1`)
+  use touched files plus one-hop local Python dependencies to avoid Cloudflare edge
+  timeouts while retaining cross-module signal. The chosen strategy is logged to
+  `supervisor.jsonl` as `scope_review_pack_strategy`. Review history carried across
+  blocking iterations. Quorum: at least
   2 of 3 triad reviewers must succeed in blocking mode. Deterministic preflight
   (uses `git diff --cached --name-status`;
   renames expand to `D src + A dst`; copies expand to `A dst` only; deleted files excluded

@@ -151,6 +151,72 @@ class TestBroaderRepoPack:
         assert "AAA" not in pack
 
 
+class TestTouchedWithLocalDepsPack:
+    def _init_repo(self, tmp_path):
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@ouroboros"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "TestBot"], cwd=str(tmp_path), capture_output=True)
+
+    def _commit_all(self, tmp_path):
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+
+    def test_openai_compatible_touched_pack_includes_2_touched_plus_3_deps(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "main.py").write_text("import app.dep_a\nfrom app import dep_b\n", encoding="utf-8")
+        (tmp_path / "app" / "worker.py").write_text("from app.dep_c import VALUE\n", encoding="utf-8")
+        (tmp_path / "app" / "dep_a.py").write_text("A = 1\n", encoding="utf-8")
+        (tmp_path / "app" / "dep_b.py").write_text("B = 1\n", encoding="utf-8")
+        (tmp_path / "app" / "dep_c.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tmp_path / "app" / "unrelated.py").write_text("UNRELATED = 1\n", encoding="utf-8")
+        self._commit_all(tmp_path)
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted, deps = mod.build_touched_with_local_deps_pack(
+            tmp_path, ["app/main.py", "app/worker.py"]
+        )
+
+        assert omitted == []
+        for expected in ["app/main.py", "app/worker.py", "app/dep_a.py", "app/dep_b.py", "app/dep_c.py"]:
+            assert f"### {expected}" in pack
+        assert "app/unrelated.py" not in pack
+        assert deps == ["app/dep_a.py", "app/dep_b.py", "app/dep_c.py"]
+
+    def test_one_hop_import_cycle_does_not_recurse(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "a.py").write_text("import app.b\n", encoding="utf-8")
+        (tmp_path / "app" / "b.py").write_text("import app.a\n", encoding="utf-8")
+        self._commit_all(tmp_path)
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted, deps = mod.build_touched_with_local_deps_pack(tmp_path, ["app/a.py"])
+
+        assert omitted == []
+        assert "### app/a.py" in pack
+        assert "### app/b.py" in pack
+        assert deps == ["app/b.py"]
+
+    def test_non_python_touched_files_do_not_expand_deps(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "README.md").write_text("# Docs\n", encoding="utf-8")
+        (tmp_path / "config.yaml").write_text("key: value\n", encoding="utf-8")
+        (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        self._commit_all(tmp_path)
+
+        mod = _get_module("ouroboros.tools.review_helpers")
+        pack, omitted, deps = mod.build_touched_with_local_deps_pack(
+            tmp_path, ["README.md", "config.yaml"]
+        )
+
+        assert omitted == []
+        assert "### README.md" in pack
+        assert "### config.yaml" in pack
+        assert "### app.py" not in pack
+        assert deps == []
+
+
 # ---------------------------------------------------------------------------
 # Scope review module tests
 # ---------------------------------------------------------------------------
@@ -362,11 +428,73 @@ class TestScopeReviewModule:
         assert "Intent / Scope Review Checklist" in source
 
     def test_scope_prompt_includes_full_repo_pack(self):
-        # scope_review now uses build_full_repo_pack (DRY, no char cap)
-        # The call is in _gather_scope_packs which _build_scope_prompt delegates to
+        # scope_review still uses build_full_repo_pack for providers that can handle full context.
+        # The call is in _gather_scope_packs which _build_scope_prompt delegates to.
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod._gather_scope_packs)
         assert "build_full_repo_pack" in source
+
+    def test_openai_compatible_uses_touched_plus_deps_strategy(self, monkeypatch, tmp_path):
+        """OpenAI-compatible scope review shrinks pack to touched files + local deps."""
+        from unittest.mock import patch
+        mod = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", raising=False)
+        meta = {}
+        with patch.object(mod, "build_touched_with_local_deps_pack", return_value=("TOUCHED_DEPS", [], ["dep.py"])) as touched:
+            with patch.object(mod, "build_full_repo_pack") as full:
+                pack = mod._gather_scope_packs(
+                    tmp_path,
+                    ["a.py", "b.py"],
+                    model="openai-compatible::gpt-5.5",
+                    strategy_meta=meta,
+                )
+        assert pack == "TOUCHED_DEPS"
+        touched.assert_called_once()
+        full.assert_not_called()
+        assert meta["strategy"] == "touched_plus_1hop"
+        assert meta["provider"] == "openai-compatible"
+        assert meta["touched_files_count"] == 2
+        assert meta["dependency_files_count"] == 1
+
+    def test_anthropic_keeps_full_repo_strategy(self, monkeypatch, tmp_path):
+        """Anthropic/OpenRouter path preserves the historical full-repo pack."""
+        from unittest.mock import patch
+        mod = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.delenv("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", raising=False)
+        meta = {}
+        with patch.object(mod, "build_full_repo_pack", return_value=("FULL_REPO", [])) as full:
+            with patch.object(mod, "build_touched_with_local_deps_pack") as touched:
+                pack = mod._gather_scope_packs(
+                    tmp_path,
+                    ["a.py"],
+                    model="anthropic::claude-opus-4.6",
+                    strategy_meta=meta,
+                )
+        assert pack == "FULL_REPO"
+        full.assert_called_once()
+        touched.assert_not_called()
+        assert meta["strategy"] == "full_repo"
+        assert meta["provider"] == "anthropic"
+
+    def test_env_override_forces_touched_plus_deps_for_anthropic(self, monkeypatch, tmp_path):
+        """OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY=1 forces the shrunk strategy for any provider."""
+        from unittest.mock import patch
+        mod = _get_module("ouroboros.tools.scope_review")
+        monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", "1")
+        meta = {}
+        with patch.object(mod, "build_touched_with_local_deps_pack", return_value=("FORCED", [], [])) as touched:
+            with patch.object(mod, "build_full_repo_pack") as full:
+                pack = mod._gather_scope_packs(
+                    tmp_path,
+                    ["a.py"],
+                    model="anthropic::claude-opus-4.6",
+                    strategy_meta=meta,
+                )
+        assert pack == "FORCED"
+        touched.assert_called_once()
+        full.assert_not_called()
+        assert meta["strategy"] == "touched_plus_1hop"
+        assert meta["provider"] == "anthropic"
 
 
 # ---------------------------------------------------------------------------

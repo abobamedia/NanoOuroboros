@@ -30,6 +30,7 @@ from ouroboros.tools.review_helpers import (
     build_head_snapshot_section,
     build_scope_section,
     build_touched_file_pack,
+    build_touched_with_local_deps_pack,
     load_checklist_section,
     CRITICAL_FINDING_CALIBRATION,
 )
@@ -207,11 +208,70 @@ def _compute_touched_status(
     return None
 
 
-def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
-    """Collect the wider repository pack for scope review.
+def _model_provider(model: str) -> str:
+    """Best-effort provider classification from a configured model id."""
+    text = str(model or "").strip()
+    if text.startswith(("openai-compatible::", "openai-compatible/")):
+        return "openai-compatible"
+    if text.startswith(("anthropic::", "anthropic/")):
+        return "anthropic"
+    if text.startswith(("openai::", "openai/")):
+        return "openai"
+    if text.startswith(("cloudru::", "cloudru/")):
+        return "cloudru"
+    return "openrouter"
+
+
+def _should_use_touched_only_scope(model: str) -> bool:
+    """Return True when scope review should shrink context for provider limits."""
+    override = os.environ.get("OUROBOROS_SCOPE_REVIEW_TOUCHED_ONLY", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    return _model_provider(model) == "openai-compatible"
+
+
+def _gather_scope_packs(
+    repo_dir: pathlib.Path,
+    all_touched_paths: list,
+    *,
+    model: str = "",
+    strategy_meta: Optional[dict] = None,
+) -> str:
+    """Collect wider context for scope review.
+
+    Anthropic/OpenRouter keep the historical full-repo pack. OpenAI-compatible
+    gateways can sit behind short Cloudflare edge timeouts, so they use a smaller
+    touched-files + one-hop local dependency pack while preserving cross-module
+    signal for the changed files.
 
     Raises RuntimeError on git failure (fail-closed).
     """
+    provider = _model_provider(model or _get_scope_model())
+    touched_count = len(all_touched_paths or [])
+    if _should_use_touched_only_scope(model or _get_scope_model()):
+        try:
+            pack, omitted, dependency_paths = build_touched_with_local_deps_pack(
+                repo_dir, list(all_touched_paths or [])
+            )
+            repo_pack_section = pack or "(no additional local dependency files)"
+            if omitted:
+                repo_pack_section += (
+                    f"\n\n*(Omitted {len(omitted)} touched/dependency file(s): "
+                    "binary, vendored, sensitive, unreadable, or >1MB)*\n"
+                )
+            if strategy_meta is not None:
+                strategy_meta.update({
+                    "strategy": "touched_plus_1hop",
+                    "provider": provider,
+                    "dependency_files_count": len(dependency_paths),
+                    "touched_files_count": touched_count,
+                })
+            return repo_pack_section
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"build_touched_with_local_deps_pack error: {exc}") from exc
+
     exclude_set = set(all_touched_paths)
     try:
         full_pack, _repo_omitted = build_full_repo_pack(repo_dir, exclude_paths=exclude_set)
@@ -222,6 +282,13 @@ def _gather_scope_packs(repo_dir: pathlib.Path, all_touched_paths: list) -> str:
             )
         if not repo_pack_section.strip():
             repo_pack_section = "(no additional repo files)"
+        if strategy_meta is not None:
+            strategy_meta.update({
+                "strategy": "full_repo",
+                "provider": provider,
+                "dependency_files_count": 0,
+                "touched_files_count": touched_count,
+            })
     except RuntimeError:
         raise
     except Exception as exc:
@@ -255,6 +322,7 @@ def _build_scope_prompt(
     review_rebuttal: str = "",
     review_history: Optional[list] = None,
     scope_review_history: Optional[list] = None,
+    strategy_meta: Optional[dict] = None,
 ) -> tuple:
     """Build the scope review prompt with full context packs.
 
@@ -310,7 +378,17 @@ def _build_scope_prompt(
     if touched_status is not None:
         return None, touched_status
 
-    repo_pack_section = _gather_scope_packs(repo_dir, all_touched_paths)
+    scope_model = _get_scope_model()
+    if strategy_meta is not None:
+        strategy_meta.update({"model": scope_model})
+    repo_pack_section = _gather_scope_packs(
+        repo_dir,
+        all_touched_paths,
+        model=scope_model,
+        strategy_meta=strategy_meta,
+    )
+    if strategy_meta is not None:
+        strategy_meta["pack_tokens_estimate"] = estimate_tokens(repo_pack_section)
 
     prompt = f"""\
 {_SCOPE_PREAMBLE}
@@ -489,6 +567,26 @@ def _log_scope_result(ctx: ToolContext, critical_count: int, advisory_count: int
         pass
 
 
+def _log_scope_pack_strategy(ctx: ToolContext, strategy_meta: dict) -> None:
+    """Append provider-aware scope-pack strategy diagnostics to supervisor.jsonl."""
+    if not strategy_meta:
+        return
+    try:
+        append_jsonl(ctx.drive_logs() / "supervisor.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "scope_review_pack_strategy",
+            "task_id": getattr(ctx, "task_id", "") or "",
+            "strategy": strategy_meta.get("strategy", "unknown"),
+            "model": strategy_meta.get("model", _get_scope_model()),
+            "provider": strategy_meta.get("provider", _model_provider(_get_scope_model())),
+            "pack_tokens_estimate": int(strategy_meta.get("pack_tokens_estimate", 0) or 0),
+            "touched_files_count": int(strategy_meta.get("touched_files_count", 0) or 0),
+            "dependency_files_count": int(strategy_meta.get("dependency_files_count", 0) or 0),
+        })
+    except Exception:
+        pass
+
+
 def _call_scope_llm(prompt: str) -> tuple:
     """Execute the scope review LLM call synchronously.
 
@@ -655,6 +753,7 @@ def run_scope_review(
     """
     repo_dir = pathlib.Path(ctx.repo_dir)
 
+    strategy_meta: dict = {}
     try:
         prompt, context_status = _build_scope_prompt(
             repo_dir, commit_message,
@@ -662,6 +761,7 @@ def run_scope_review(
             review_rebuttal=review_rebuttal,
             review_history=review_history,
             scope_review_history=scope_review_history,
+            strategy_meta=strategy_meta,
         )
     except RuntimeError as exc:
         return ScopeReviewResult(
@@ -672,6 +772,8 @@ def run_scope_review(
                 "Ensure git is available and the repository is in a valid state."
             ),
         )
+
+    _log_scope_pack_strategy(ctx, strategy_meta)
 
     signal_result = _handle_prompt_signals(prompt, context_status)
     if signal_result is not None:

@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.7](https://img.shields.io/badge/version-4.18.7-green.svg)](VERSION)
+[![Version 4.18.8](https://img.shields.io/badge/version-4.18.8-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.8 | 2026-04-26 | scope_review: provider-aware pack strategy — for openai-compatible models use touched-files+1-hop-deps instead of full-repo pack to fit Cloudflare 100s edge-timeout, keeping cross-module signal without prompt bloat. |
 | 4.18.7 | 2026-04-26 | Fix evolution false-positive failure tracking caused by the old cost-only success signal: landed repo commits now reset the circuit breaker first, cost remains a secondary success signal, failures log explicit reasons, and a one-time state migration clears stale counters from the pre-4.18.6 accounting bug. |
 | 4.18.6 | 2026-04-25 | Fix OpenAI-compatible / nekocode budget tracking: token-only usage responses now estimate non-zero cost via OpenAI pricing aliases (including `openai-compatible/gpt-5.5`) so `llm_usage` events increment `spent_usd`, with regression coverage for the event-to-state path. |
 | 4.18.5 | 2026-04-23 | Harden the standard OpenAI-compatible sync/async chat paths against gateway timeouts: cached remote SDK clients now use explicit 15/900/60/15 transport timeouts with `max_retries=2`, while `LLMClient._chat_remote` and `chat_async` add exponential backoff retries for timeout-like failures, with targeted regression coverage. |
