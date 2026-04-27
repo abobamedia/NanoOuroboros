@@ -575,11 +575,13 @@ def _run_generation(state: dict[str, Any]) -> dict[str, Any]:
     known_memory = build_known_memory(state["student_id"], state["project_id"])
     avoid_patterns = known_memory.get("avoid_patterns") or []
     offer = _extract_offer(state.get("brief_text") or "")
+    target_count = _extract_target_count(state.get("brief_text") or "")
     hypotheses, generator_cost = generator.generate_hypotheses(
         brief,
         offer=offer,
         audience_awareness=_extract_awareness(state.get("brief_text") or ""),
         avoid_patterns=avoid_patterns,
+        target_count=target_count,
         max_retries=1,
     )
     judge_report, judge_cost = judge.evaluate_hypotheses(
@@ -588,7 +590,7 @@ def _run_generation(state: dict[str, Any]) -> dict[str, Any]:
         known_memory=known_memory,
         max_retries=1,
     )
-    normalized = _rank_hypotheses(hypotheses, judge_report, limit=30)
+    normalized = _rank_hypotheses(hypotheses, judge_report, limit=max(1, min(30, target_count)))
     return {
         "hypotheses": normalized,
         "judge_report": judge_report,
@@ -597,6 +599,7 @@ def _run_generation(state: dict[str, Any]) -> dict[str, Any]:
             "judge_cost_usd": judge_cost,
             "source_files": [str(path) for path in files],
             "avoid_patterns": avoid_patterns,
+            "target_count": target_count,
         },
     }
 
@@ -654,6 +657,24 @@ def _extract_awareness(text: str) -> str:
     if "горяч" in lowered or "hot" in lowered:
         return "hot"
     return "warm"
+
+
+def _extract_target_count(text: str, default: int = 20) -> int:
+    lowered = str(text or "").lower()
+    patterns = (
+        r"(?:вариантов|варианта|вариант|заголовков|объявлений)\D{0,24}(\d{1,3})",
+        r"(\d{1,3})\s*(?:вариантов|варианта|вариант|заголовков|объявлений)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except ValueError:
+            continue
+        return max(1, min(30, value))
+    return default
 
 
 def _rank_hypotheses(

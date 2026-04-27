@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.15](https://img.shields.io/badge/version-4.18.15-green.svg)](VERSION)
+[![Version 4.18.16](https://img.shields.io/badge/version-4.18.16-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.16 | 2026-04-28 | Make Telegram student Direct generation honor requested pack size from the brief, cap runs to 30 variants, and pass `target_count` into the workspace generator so real exports do not over-generate after broad analytics produce many request patterns. |
 | 4.18.15 | 2026-04-28 | Fix Telegram student generation after Drive intake by registering dynamically loaded workspace skill modules in `sys.modules` before execution, preventing dataclass import crashes; add `/retry` so failed student sessions can rerun the saved Drive link and brief after infrastructure recovery. |
 | 4.18.14 | 2026-04-27 | Add Telegram dual-loop student feedback plumbing: inline callback buttons, approved-student session state, append-only feedback v2, tested-creatives learning memory, owner student commands, XLSX Direct ingestion support, and generator `avoid_patterns` constraints from prior student rejections. |
 | 4.18.13 | 2026-04-27 | Clean up startup review-continuation hygiene and harden Telegram intake: completed continuations no longer create startup warnings, `/start`/`/help` are static low-cost student onboarding replies, non-owner Telegram users cannot trigger owner control commands, and student Drive-link requests are wrapped in a client-facing Direct workflow prompt. |

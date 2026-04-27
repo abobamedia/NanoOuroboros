@@ -34,6 +34,17 @@ def test_generator_prompt_contains_avoid_patterns():
     assert "План питания для похудения" in prompt
 
 
+def test_generator_target_count_budget_helpers():
+    generator = _load(
+        "direct_ad_generator_budget_for_test",
+        WORKSPACE / "skills" / "direct_ad_generator" / "generator.py",
+    )
+
+    assert generator._normalize_target_count(99) == 30
+    assert generator._normalize_target_count("bad") is None
+    assert generator._completion_token_budget(20) >= 3600
+
+
 def test_workspace_ingestion_derives_impressions_from_ctr_real_headers():
     parser = _load(
         "direct_ingestion_parser_for_test",

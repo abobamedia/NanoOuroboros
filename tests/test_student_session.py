@@ -209,6 +209,13 @@ def test_load_module_registers_dataclass_module(monkeypatch, tmp_path):
     assert module.CreativeBrief(728_000).rows_count == 728_000
 
 
+def test_extract_target_count_from_student_brief():
+    assert student_session._extract_target_count("Вариантов сделай 20") == 20
+    assert student_session._extract_target_count("нужно 7 заголовков") == 7
+    assert student_session._extract_target_count("сделай 999 вариантов") == 30
+    assert student_session._extract_target_count("без числа") == 20
+
+
 def test_multi_tenant_status_does_not_leak_other_pack(monkeypatch, tmp_path):
     _data, _workspace = _roots(monkeypatch, tmp_path)
     monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "111 222")
