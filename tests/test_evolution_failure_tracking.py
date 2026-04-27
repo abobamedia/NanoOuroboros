@@ -144,3 +144,42 @@ def test_evolution_failure_logic_migration_persists_on_load(tmp_path):
     assert loaded["evolution_failure_logic_version"] == 2
     assert persisted["evolution_consecutive_failures"] == 0
     assert persisted["evolution_failure_logic_version"] == 2
+
+
+def test_sync_current_git_identity_preserves_unrelated_state_fields(tmp_path):
+    from supervisor import state as state_module
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "locks").mkdir()
+    state_module.init(tmp_path, total_budget_limit=10.0)
+    state_module.save_state({
+        "current_sha": "oldsha",
+        "current_branch": "ouroboros",
+        "spent_usd": 42.5,
+        "owner_chat_id": 123,
+    })
+
+    updated = state_module.sync_current_git_identity("newsha", "ouroboros")
+    persisted = json.loads(state_module.STATE_PATH.read_text(encoding="utf-8"))
+
+    assert updated["current_sha"] == "newsha"
+    assert persisted["current_sha"] == "newsha"
+    assert persisted["spent_usd"] == 42.5
+    assert persisted["owner_chat_id"] == 123
+
+
+def test_sync_current_git_identity_does_not_write_without_state_lock(tmp_path, monkeypatch):
+    from supervisor import state as state_module
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "locks").mkdir()
+    state_module.init(tmp_path, total_budget_limit=10.0)
+    state_module.save_state({"current_sha": "oldsha", "spent_usd": 42.5})
+    monkeypatch.setattr(state_module, "acquire_file_lock", lambda *args, **kwargs: None)
+
+    updated = state_module.sync_current_git_identity("newsha", "ouroboros")
+    persisted = json.loads(state_module.STATE_PATH.read_text(encoding="utf-8"))
+
+    assert updated["current_sha"] == "oldsha"
+    assert persisted["current_sha"] == "oldsha"
+    assert persisted["spent_usd"] == 42.5

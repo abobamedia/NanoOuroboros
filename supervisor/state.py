@@ -218,6 +218,23 @@ def save_state(st: Dict[str, Any]) -> None:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
+def sync_current_git_identity(current_sha: str, current_branch: str = "") -> Dict[str, Any]:
+    """Update only current git identity fields under the state lock."""
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    if lock_fd is None:
+        st_obj = json_load_file(STATE_PATH) or json_load_file(STATE_LAST_GOOD_PATH) or {}
+        return ensure_state_defaults(st_obj)
+    try:
+        st = _load_state_unlocked()
+        st["current_sha"] = current_sha
+        if current_branch:
+            st["current_branch"] = current_branch
+        _save_state_unlocked(st)
+        return dict(st)
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
 def init_state() -> Dict[str, Any]:
     """
     Initialize state at session start, capturing snapshots for budget drift detection.

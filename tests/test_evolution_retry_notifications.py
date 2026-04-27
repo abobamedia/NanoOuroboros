@@ -134,3 +134,86 @@ def test_worker_crash_requeue_increments_attempt_before_next_notification(tmp_pa
         queue.RUNNING = orig_queue_running
         workers._LAST_SPAWN_TIME = orig_last_spawn
         workers.CRASH_TS[:] = orig_crash_ts
+
+
+def test_worker_sha_verifier_syncs_stale_state_to_live_head(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+
+    synced_states = []
+    supervisor_events = []
+    original_drive = workers.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(workers, "load_state", lambda: {"current_sha": "oldsha", "current_branch": "ouroboros"})
+    monkeypatch.setattr(workers, "sync_current_git_identity", lambda sha, branch="": synced_states.append({"current_sha": sha, "current_branch": branch, "spent_usd": 12.34}) or synced_states[-1])
+    monkeypatch.setattr(workers, "_current_repo_identity", lambda: ("newsha", "ouroboros"))
+    monkeypatch.setattr(workers, "append_jsonl", lambda path, payload: supervisor_events.append(payload))
+
+    try:
+        synced = workers._sync_expected_worker_sha_from_head()
+    finally:
+        workers.DRIVE_ROOT = original_drive
+
+    assert synced["current_sha"] == "newsha"
+    assert synced["spent_usd"] == 12.34
+    assert synced_states[-1]["current_sha"] == "newsha"
+    assert [e for e in supervisor_events if e.get("type") == "worker_expected_sha_synced"]
+
+
+def test_worker_sha_sync_failure_skips_verification_instead_of_using_stale_sha(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+
+    supervisor_events = []
+    original_drive = workers.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(workers, "load_state", lambda: {"current_sha": "oldsha", "current_branch": "ouroboros"})
+    monkeypatch.setattr(workers, "sync_current_git_identity", lambda sha, branch="": {"current_sha": "oldsha", "current_branch": "ouroboros"})
+    monkeypatch.setattr(workers, "_current_repo_identity", lambda: ("newsha", "ouroboros"))
+    monkeypatch.setattr(workers, "append_jsonl", lambda path, payload: supervisor_events.append(payload))
+
+    try:
+        synced = workers._sync_expected_worker_sha_from_head()
+    finally:
+        workers.DRIVE_ROOT = original_drive
+
+    assert synced["current_sha"] == ""
+    skipped = [e for e in supervisor_events if e.get("type") == "worker_expected_sha_sync_skipped"]
+    assert skipped and skipped[-1]["target_sha"] == "newsha"
+    assert skipped[-1]["state_sha"] == "oldsha"
+
+
+def test_worker_sha_verifier_still_warns_on_real_mismatch_after_sync(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+
+    sent_messages = []
+    supervisor_events = []
+    original_drive = workers.DRIVE_ROOT
+    workers.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(exist_ok=True)
+
+    monkeypatch.setattr(
+        workers,
+        "_sync_expected_worker_sha_from_head",
+        lambda: {"current_sha": "live-head", "owner_chat_id": 123},
+    )
+    monkeypatch.setattr(
+        workers,
+        "_first_worker_boot_event_since",
+        lambda _offset: {"type": "worker_boot", "git_sha": "wrong-head", "pid": 456},
+    )
+    monkeypatch.setattr(workers, "append_jsonl", lambda path, payload: supervisor_events.append(payload))
+    monkeypatch.setattr(workers, "send_with_budget", lambda chat_id, text: sent_messages.append((chat_id, text)))
+
+    try:
+        workers._verify_worker_sha_after_spawn(0, timeout_sec=1.0)
+    finally:
+        workers.DRIVE_ROOT = original_drive
+
+    verify_events = [e for e in supervisor_events if e.get("type") == "worker_sha_verify"]
+    assert verify_events and verify_events[-1]["ok"] is False
+    assert verify_events[-1]["expected_sha"] == "live-head"
+    assert verify_events[-1]["observed_sha"] == "wrong-head"
+    assert sent_messages == [(123, "⚠️ Worker SHA mismatch after spawn: expected live-hea, got wrong-he")]

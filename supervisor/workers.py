@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from supervisor.state import load_state, append_jsonl
+from supervisor.state import load_state, sync_current_git_identity, append_jsonl
 from supervisor import git_ops
 from supervisor.message_bus import send_with_budget
 
@@ -393,9 +393,67 @@ def _first_worker_boot_event_since(offset_bytes: int) -> Optional[Dict[str, Any]
     return None
 
 
+def _current_repo_identity() -> Tuple[str, str]:
+    """Return the actual current branch/SHA for the supervisor repo."""
+    rc_sha, sha, _err_sha = git_ops.git_capture(["git", "rev-parse", "HEAD"])
+    if rc_sha != 0 or not sha.strip():
+        return "", ""
+    rc_branch, branch, _err_branch = git_ops.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    return sha.strip(), branch.strip() if rc_branch == 0 else ""
+
+
+def _sync_expected_worker_sha_from_head() -> Dict[str, Any]:
+    """Synchronize state.current_sha with actual HEAD before worker verification.
+
+    Legitimate restarts can load workers from a newer local commit while the
+    persistent state still carries an older current_sha.  The verifier should
+    compare workers to the live repo HEAD, not to stale transport state.
+    """
+    st = load_state()
+    actual_sha, actual_branch = _current_repo_identity()
+    if not actual_sha:
+        return st
+
+    previous_sha = str(st.get("current_sha") or "").strip()
+    previous_branch = str(st.get("current_branch") or "").strip()
+    if previous_sha == actual_sha and (not actual_branch or previous_branch == actual_branch):
+        return st
+
+    st = sync_current_git_identity(actual_sha, actual_branch)
+    synced_sha = str(st.get("current_sha") or "").strip()
+    if synced_sha != actual_sha:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "worker_expected_sha_sync_skipped",
+                "reason": "state_lock_unavailable_or_sync_failed",
+                "previous_sha": previous_sha,
+                "target_sha": actual_sha,
+                "state_sha": synced_sha,
+            },
+        )
+        st = dict(st)
+        st["current_sha"] = ""
+        return st
+
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "worker_expected_sha_synced",
+            "previous_sha": previous_sha,
+            "current_sha": actual_sha,
+            "previous_branch": previous_branch,
+            "current_branch": st.get("current_branch"),
+        },
+    )
+    return st
+
+
 def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0) -> None:
     """Verify that newly spawned workers booted with expected current_sha."""
-    st = load_state()
+    st = _sync_expected_worker_sha_from_head()
     expected_sha = str(st.get("current_sha") or "").strip()
     if not expected_sha:
         append_jsonl(

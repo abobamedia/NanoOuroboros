@@ -1,4 +1,4 @@
-# Ouroboros v4.18.11 — Architecture & Reference
+# Ouroboros v4.18.12 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -436,7 +436,7 @@ Runs in a background thread inside `server.py:_run_supervisor()`.
 
 Each iteration (0.5s sleep):
 1. `rotate_chat_log_if_needed()` — archive chat.jsonl if > 800KB
-2. `ensure_workers_healthy()` — respawn dead workers, detect crash storms
+2. `ensure_workers_healthy()` — respawn dead workers, detect crash storms; worker spawn verification synchronizes expected `current_sha` from live git HEAD before comparing boot events so legitimate restarts do not produce stale-state SHA mismatch warnings while real mismatches still alert.
 3. Drain event queue (worker→supervisor events via multiprocessing.Queue)
 4. `enforce_task_timeouts()` — soft/hard timeout handling
 5. `enqueue_evolution_task_if_needed()` — auto-queue evolution if enabled
