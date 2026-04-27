@@ -13,7 +13,29 @@ STUDENT_STATUS_TEXT = (
     "ниша, оффер, гео, цель."
 )
 OWNER_ONLY_TEXT = "Эта команда доступна только владельцу в Web UI."
-OWNER_COMMANDS = {"/panic", "/restart", "/review", "/evolve", "/bg"}
+OWNER_COMMANDS = {
+    "/panic",
+    "/restart",
+    "/review",
+    "/evolve",
+    "/bg",
+    "/student_view",
+    "/student_inject",
+    "/append_owner_pref",
+}
+STUDENT_COMMANDS = {
+    "/start",
+    "/help",
+    "/new",
+    "/cancel",
+    "/status",
+    "/take",
+    "/skip",
+    "/rewrite",
+    "/more",
+    "/done",
+    "/delete_current",
+}
 STUDENT_AGENT_PREFIX = (
     "External Telegram student/media-buyer request. Treat this as client-facing "
     "Yandex Direct creative work, not an owner/self-modification chat. Do not reveal "

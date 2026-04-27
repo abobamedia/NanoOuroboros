@@ -38,6 +38,7 @@ from ouroboros.server_control import (
     restart_current_process as _restart_current_process_impl,
 )
 from ouroboros.server_history_api import make_chat_history_endpoint, make_cost_breakdown_endpoint
+from ouroboros.server_telegram_routing import route_telegram_control as _route_telegram_control
 from ouroboros.server_auth import (
     NetworkAuthGate,
     get_network_auth_startup_warning,
@@ -46,11 +47,7 @@ from ouroboros.server_auth import (
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
 from ouroboros.telegram_gateway import (
-    OWNER_COMMANDS as _TELEGRAM_OWNER_COMMANDS,
-    OWNER_ONLY_TEXT as _TELEGRAM_OWNER_ONLY_TEXT,
     STUDENT_AGENT_PREFIX as _TELEGRAM_STUDENT_AGENT_PREFIX,
-    STUDENT_HELP_TEXT as _TELEGRAM_STUDENT_HELP_TEXT,
-    STUDENT_STATUS_TEXT as _TELEGRAM_STUDENT_STATUS_TEXT,
 )
 
 # ---------------------------------------------------------------------------
@@ -305,7 +302,22 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
     updates = bridge.get_updates(offset=offset, timeout=1)
     for upd in updates:
         offset = int(upd["update_id"]) + 1
+        callback_query = upd.get("callback_query") or {}
         msg = upd.get("message") or {}
+        if callback_query:
+            callback_message = callback_query.get("message") or {}
+            msg = {
+                "chat": callback_message.get("chat") or {},
+                "from": callback_query.get("from") or {},
+                "text": str(callback_query.get("data") or ""),
+                "source": callback_query.get("source") or "telegram",
+                "sender_label": callback_query.get("sender_label") or "",
+                "sender_session_id": callback_query.get("sender_session_id") or "",
+                "client_message_id": callback_query.get("client_message_id") or "",
+                "telegram_chat_id": callback_query.get("telegram_chat_id") or 0,
+                "callback_data": str(callback_query.get("data") or ""),
+                "callback_query_id": str(callback_query.get("id") or ""),
+            }
         if not msg:
             continue
 
@@ -317,6 +329,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         sender_session_id = str(msg.get("sender_session_id") or "")
         client_message_id = str(msg.get("client_message_id") or "")
         telegram_chat_id = int(msg.get("telegram_chat_id") or 0)
+        callback_data = str(msg.get("callback_data") or "")
+        callback_query_id = str(msg.get("callback_query_id") or "")
         image_base64 = str(msg.get("image_base64") or "")
         image_mime = str(msg.get("image_mime") or "image/jpeg")
         image_caption = str(msg.get("image_caption") or "")
@@ -325,7 +339,11 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             if image_base64
             else None
         )
-        log_text = text or image_caption or ("(image attached)" if image_base64 else "")
+        log_text = (
+            f"[callback] {callback_data}"
+            if callback_data
+            else text or image_caption or ("(image attached)" if image_base64 else "")
+        )
         now_iso = datetime.now(timezone.utc).isoformat()
 
         st = ctx.load_state()
@@ -353,32 +371,21 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             continue
 
         lowered = text.strip().lower()
-        telegram_source = str(source or "").lower() == "telegram" or int(telegram_chat_id or 0) > 0
-        telegram_owner = False
-        telegram_command = ""
-        if telegram_source:
-            command_head = lowered.split(maxsplit=1)[0] if lowered.strip() else ""
-            telegram_command = command_head.split("@", 1)[0]
-            owner_chat_id = 0
-            owner_raw = os.environ.get("TELEGRAM_OWNER_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID") or ""
-            try:
-                owner_chat_id = int(str(owner_raw).strip())
-            except ValueError:
-                owner_chat_id = 0
-            telegram_owner = bool(owner_chat_id and chat_id == owner_chat_id)
-        if telegram_source and telegram_command in ("/start", "/help"):
-            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_HELP_TEXT)
+        telegram_route = _route_telegram_control(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            sender_label=sender_label,
+            telegram_chat_id=telegram_chat_id,
+            callback_data=callback_data,
+            callback_query_id=callback_query_id,
+            ctx=ctx,
+            data_dir=DATA_DIR,
+        )
+        telegram_source = telegram_route.telegram_source
+        telegram_owner = telegram_route.telegram_owner
+        if telegram_route.consumed:
             continue
-        if telegram_source and telegram_command == "/status" and not telegram_owner:
-            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_STATUS_TEXT)
-            continue
-        if telegram_source and telegram_command in _TELEGRAM_OWNER_COMMANDS and not telegram_owner:
-            ctx.send_with_budget(chat_id, _TELEGRAM_OWNER_ONLY_TEXT)
-            continue
-        if telegram_source and telegram_command.startswith("/") and not telegram_owner:
-            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_HELP_TEXT)
-            continue
-
         if lowered.startswith("/panic"):
             ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)

@@ -1,4 +1,4 @@
-# Ouroboros v4.18.13 — Architecture & Reference
+# Ouroboros v4.18.14 — Architecture & Reference
 
 This document describes every component, page, button, API endpoint, and data flow.
 It is the single source of truth for how the system works. Keep it updated.
@@ -62,7 +62,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on localhost:8765
       ├── server_entrypoint.py ← CLI argument parsing, port-binding helpers
       ├── server_history_api.py ← Chat history + cost breakdown endpoints
       ├── server_runtime.py    ← Server startup/onboarding and WebSocket liveness helpers
+      ├── server_telegram_routing.py ← Telegram owner/student routing helpers kept out of server.py
       ├── server_web.py        ← Static web file helpers (NoCacheStaticFiles, web dir resolver)
+      ├── student_session.py   ← Telegram student workflow: approved-student sessions, callback tokens, feedback v2, Direct pack handoff
       ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
       ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
@@ -129,6 +131,7 @@ Dockerfile                    ← Docker image (web UI runtime)
 │   ├── settings.json   ← User settings (API keys, models, budget)
 │   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
+│   │   ├── students_index.json ← Approved Telegram student map + current session pointers (outside git)
 │   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations)
 │   │   ├── queue_snapshot.json
 │   │   └── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
@@ -244,7 +247,10 @@ Navigation is a left sidebar with 7 pages (Chat, Files, Logs, Costs, Evolution, 
 - **Persistence**: chat history loaded from server on page load (`/api/chat/history`), survives app restarts. Fallback to sessionStorage. `syncHistory` uses two-pass processing: progress/summary messages are replayed first (building live card timelines), then regular assistant/user messages are processed (calling `finishLiveCard`). This guarantees thinking bubbles are never discarded due to `taskState.completed` being set before progress events are applied. After first load, if any live card is still active (task ongoing mid-reload), `showTyping()` is called to restore the typing indicator.
 - **Duplicate-bubble prevention**: queued local user bubbles carry a `client_message_id`; echoed WebSocket/history messages with the same id are merged instead of duplicated.
 - **Empty-chat init**: if neither server history nor sessionStorage has messages, the UI shows a transient assistant bubble: `Ouroboros has awakened`. This is visual-only and is not written to chat history.
-- **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, and Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running).
+- **Telegram bridge**: Web UI initiated chats can be mirrored into the bound Telegram chat, Telegram text input is injected back into the same live chat timeline, Telegram photos are bridged as image-aware user messages (including while a direct-chat turn is already running), and Bot API `callback_query` updates are normalized into local updates for inline keyboard feedback.
+- **Telegram student dual-loop**: approved non-owner Telegram chats are routed through `ouroboros/student_session.py` before the generic agent. Unknown chats receive a short Russian denial and do not create state or spend LLM budget. Approved students get `/new` sessions, Drive URL intake, brief capture, generated pack delivery in Telegram chunks with inline buttons, and feedback commands/buttons (`take`, `skip`, `rewrite`, `more`, `done`). Callback data is an opaque `ou:<token>` under Telegram's 64-byte limit; payloads live in the per-request pack state.
+- **Student state files**: `students_index.json` lives in runtime data outside git. Per-student work dirs live under `~/AI/ouroboros-workspace/students/<student_id>/projects/<project_id>/` with `exports/`, `briefs/`, `packs/`, and `pack_states/`. Pack state is written with file lock + atomic replace and expires after 48h of inactivity.
+- **Student feedback memory**: feedback is appended to `domain_memory/yandex_direct/student_feedback/feedback.jsonl` as schema v2 rows containing headline/text/angle, judge verdict/score, reason categories, and UI source. Legacy v1 rows remain readable. Accepted/launched/winner/loser events also append normalized entries to `domain_memory/yandex_direct/tested_creatives.jsonl`; legacy `ads_pack*.json` files remain read-only dedup sources.
 - Messages sent via WebSocket `{type: "chat", content: text, sender_session_id: "uuid"}`.
 - Responses arrive via WebSocket `{type: "chat", role, content, ts, source?, sender_label?, sender_session_id?, client_message_id?}` and `{type: "photo", role, image_base64, mime, caption?, ts, source?, sender_label?}`. On page-load history sync, `/api/chat/history` can also return `role: "system"` entries for internal summaries plus metadata for multi-user reconstruction.
 - Supports slash commands: `/status`, `/evolve`, `/review`, `/bg`, `/restart`, `/panic`.
@@ -455,6 +461,9 @@ Each iteration (0.5s sleep):
 | `/review` | Queue a deep self-review (1M-context single-pass Constitution review) |
 | `/evolve on\|off` | Toggle evolution mode in state, prune evolution tasks if off |
 | `/bg start\|stop\|status` | Control background consciousness |
+| `/student_view <sid>` | Owner-only Telegram helper: inspect approved student state |
+| `/student_inject <sid> <text>` | Owner-only Telegram helper: send a note to a student chat |
+| `/append_owner_pref <text>` | Owner-only Telegram helper: append a generation preference to workspace memory |
 | `/status` | Send status text with budget breakdown |
 | (anything else) | Route to agent via `handle_chat_direct()` |
 
@@ -988,6 +997,9 @@ Settings file: `~/Ouroboros/data/settings.json`. File-locked for concurrent acce
 | ANTHROPIC_API_KEY | "" | Optional. Enables direct Anthropic runtime routing (`anthropic::...` model values) and Claude Agent SDK tools (`claude_code_edit`, `advisory_pre_review`) |
 | TELEGRAM_BOT_TOKEN | "" | Optional. Enables Telegram bridge polling/sending |
 | TELEGRAM_CHAT_ID | "" | Optional. Pin replies to a specific Telegram chat |
+| TELEGRAM_OWNER_CHAT_ID | "" | Optional. Owner Telegram chat id for protected runtime commands |
+| TELEGRAM_ALLOWED_CHAT_IDS | "" | Optional comma/space-separated approved student chat ids |
+| TELEGRAM_STUDENT_INTAKE_ENABLED | "0" | Optional. Allows polling multiple chats; routing still requires explicit approval via allowed ids or `students_index.json` |
 | OUROBOROS_NETWORK_PASSWORD | "" | Optional. Enables the non-loopback auth gate when set; empty still allows open bind, but startup logs a warning |
 | OUROBOROS_MODEL | anthropic/claude-opus-4.6 | Main reasoning model |
 | OUROBOROS_MODEL_CODE | anthropic/claude-opus-4.6 | Code editing model |

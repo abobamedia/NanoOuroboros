@@ -1,4 +1,5 @@
 import base64
+import json
 
 import supervisor.message_bus as message_bus
 
@@ -46,6 +47,25 @@ def test_telegram_default_keeps_single_active_chat_guard(monkeypatch):
 
     assert bridge._telegram_accepts_chat(111)
     assert not bridge._telegram_accepts_chat(222)
+
+
+def test_telegram_accepts_students_index_approved_chat(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    state_dir = data_dir / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "students_index.json").write_text(json.dumps({
+        "schema_version": 1,
+        "students": {
+            "222": {"student_id": "student_222", "approved": True},
+        },
+    }), encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data_dir))
+    bridge = _make_bridge(monkeypatch, {
+        "TELEGRAM_BOT_TOKEN": "token",
+        "TELEGRAM_CHAT_ID": "111",
+    })
+
+    assert bridge._telegram_accepts_chat(222)
 
 
 def test_telegram_target_uses_allowed_preferred_chat(monkeypatch):
@@ -174,7 +194,7 @@ def test_telegram_bridge_routes_web_messages_replies_actions_and_photos(monkeypa
     monkeypatch.setattr(
         bridge,
         "_send_telegram_text",
-        lambda text, preferred_chat_id=0: sent_text.append((text, preferred_chat_id)),
+        lambda text, preferred_chat_id=0, reply_markup=None: sent_text.append((text, preferred_chat_id, reply_markup)),
     )
     monkeypatch.setattr(
         bridge,
@@ -199,9 +219,52 @@ def test_telegram_bridge_routes_web_messages_replies_actions_and_photos(monkeypa
     bridge.send_chat_action(555, "typing")
     bridge.send_photo(555, b"img", caption="caption")
 
-    assert sent_text[1] == ("assistant reply", 555)
+    assert sent_text[1] == ("assistant reply", 555, None)
     assert broadcasts[1]["task_id"] == "task-42"
     assert sent_actions == [("typing", 555)]
     assert sent_photos == [(b"img", "caption", "image/png", 555)]
     photo_broadcast = next(item for item in broadcasts if item.get("type") == "photo")
     assert photo_broadcast["ts"].endswith("+00:00")
+
+
+def test_telegram_bridge_callback_query_and_reply_markup(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {"TELEGRAM_BOT_TOKEN": "token"})
+    broadcasts = []
+    sent_params = []
+    bridge._broadcast_fn = broadcasts.append
+
+    def fake_api(method, **kwargs):
+        if method == "getUpdates":
+            bridge._telegram_stop.set()
+            return {
+                "ok": True,
+                "result": [{
+                    "update_id": 12,
+                    "callback_query": {
+                        "id": "cb-1",
+                        "data": "ou:abc",
+                        "message": {"chat": {"id": 777}},
+                        "from": {"id": 888, "username": "anton"},
+                    },
+                }],
+            }
+        sent_params.append((method, kwargs.get("params")))
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(bridge, "_telegram_api", fake_api)
+
+    bridge._telegram_stop.clear()
+    bridge._telegram_poll_loop()
+    updates = bridge.get_updates(offset=0, timeout=1)
+
+    callback = updates[0]["callback_query"]
+    assert callback["id"] == "cb-1"
+    assert callback["data"] == "ou:abc"
+    assert callback["telegram_chat_id"] == 777
+    assert callback["source"] == "telegram"
+    assert broadcasts[0]["content"] == "[callback] ou:abc"
+
+    markup = {"inline_keyboard": [[{"text": "Взять", "callback_data": "ou:abc"}]]}
+    bridge.send_message(777, "выбери", reply_markup=markup)
+    assert sent_params[0][0] == "sendMessage"
+    assert '"callback_data": "ou:abc"' in sent_params[0][1]["reply_markup"]

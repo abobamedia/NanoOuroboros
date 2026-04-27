@@ -186,6 +186,7 @@ def test_telegram_start_is_static_and_skips_chat_agent(monkeypatch, tmp_path):
     server_module = _reload_server(monkeypatch, tmp_path)
     import supervisor.message_bus as message_bus
 
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "958257094")
     monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
 
     class _Bridge:
@@ -227,7 +228,7 @@ def test_telegram_start_is_static_and_skips_chat_agent(monkeypatch, tmp_path):
     assert ctx.chat_calls == []
     assert ctx.sent[0][0] == 958257094
     assert "Google Drive" in ctx.sent[0][1]
-    assert "выгрузкой" in ctx.sent[0][1]
+    assert "учебный бот" in ctx.sent[0][1]
 
 
 def test_telegram_non_owner_restart_is_denied(monkeypatch, tmp_path):
@@ -276,7 +277,60 @@ def test_telegram_non_owner_restart_is_denied(monkeypatch, tmp_path):
     assert ctx.sent == [(222, "Эта команда доступна только владельцу в Web UI.", {})]
 
 
-def test_telegram_student_drive_request_gets_safe_agent_prefix(monkeypatch, tmp_path):
+def test_telegram_owner_restart_reaches_owner_handler(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    import supervisor.message_bus as message_bus
+
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "111")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server_module, "_request_restart_exit", lambda: None)
+
+    class _Bridge:
+        def get_updates(self, offset, timeout=1):
+            return [{
+                "update_id": 22,
+                "message": {
+                    "chat": {"id": 111},
+                    "from": {"id": 111},
+                    "text": "/restart",
+                    "source": "telegram",
+                    "telegram_chat_id": 111,
+                },
+            }]
+
+    class _Ctx:
+        def __init__(self):
+            self.state = {"owner_id": 1, "owner_chat_id": 1}
+            self.sent = []
+            self.restart_called = False
+            self.killed = False
+
+        def load_state(self):
+            return dict(self.state)
+
+        def save_state(self, state):
+            self.state = dict(state)
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+        def safe_restart(self, **kwargs):
+            self.restart_called = True
+            return True, "ok"
+
+        def kill_workers(self, force=False):
+            self.killed = True
+
+    ctx = _Ctx()
+    server_module._process_bridge_updates(_Bridge(), 0, ctx)
+
+    assert ctx.restart_called
+    assert ctx.killed
+    assert ctx.sent[0][0] == 111
+    assert "Restarting" in ctx.sent[0][1]
+
+
+def test_telegram_unknown_student_drive_request_is_denied(monkeypatch, tmp_path):
     server_module = _reload_server(monkeypatch, tmp_path)
     import supervisor.message_bus as message_bus
 
@@ -349,17 +403,60 @@ def test_telegram_student_drive_request_gets_safe_agent_prefix(monkeypatch, tmp_
     ctx = _Ctx()
     server_module._process_bridge_updates(_Bridge(), 0, ctx)
 
-    assert ctx.consciousness.observations == [
-        "Telegram student message: https://drive.google.com/drive/folders/demo оффер: окна, гео Москва"
-    ]
-    assert ctx.consciousness.paused == 1
-    assert ctx.consciousness.resumed == 1
-    chat_id, agent_text, image_data = ctx.chat_calls[0]
-    assert chat_id == 333
-    assert image_data is None
-    assert "External Telegram student/media-buyer request" in agent_text
-    assert "Do not reveal internal identity" in agent_text
-    assert "https://drive.google.com/drive/folders/demo" in agent_text
+    assert ctx.consciousness.observations == []
+    assert ctx.consciousness.paused == 0
+    assert ctx.consciousness.resumed == 0
+    assert ctx.chat_calls == []
+    assert ctx.sent[0][0] == 333
+    assert "Доступ к учебному боту пока не подключён" in ctx.sent[0][1]
+
+
+def test_telegram_approved_student_new_reaches_student_session(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    import supervisor.message_bus as message_bus
+
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "333")
+    monkeypatch.setenv("OUROBOROS_FILE_BROWSER_DEFAULT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+
+    class _Bridge:
+        def get_updates(self, offset, timeout=1):
+            return [{
+                "update_id": 4,
+                "message": {
+                    "chat": {"id": 333},
+                    "from": {"id": 333},
+                    "text": "/new",
+                    "source": "telegram",
+                    "telegram_chat_id": 333,
+                    "sender_label": "Telegram (student)",
+                },
+            }]
+
+    class _Ctx:
+        def __init__(self):
+            self.state = {"owner_id": 1, "owner_chat_id": 1}
+            self.sent = []
+            self.chat_calls = []
+
+        def load_state(self):
+            return dict(self.state)
+
+        def save_state(self, state):
+            self.state = dict(state)
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+        def handle_chat_direct(self, *args):
+            self.chat_calls.append(args)
+
+    ctx = _Ctx()
+    server_module._process_bridge_updates(_Bridge(), 0, ctx)
+
+    assert ctx.chat_calls == []
+    assert ctx.sent[0][0] == 333
+    assert "Новая сессия создана" in ctx.sent[0][1]
 
 
 @pytest.mark.skipif(

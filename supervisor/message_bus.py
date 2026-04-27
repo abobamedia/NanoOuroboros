@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import json
 import logging
 import mimetypes
 import queue
@@ -88,6 +89,27 @@ class LocalChatBridge:
                 }
             else:
                 msg = dict(raw_msg or {})
+
+            if msg.get("type") == "callback_query":
+                callback = {
+                    "id": str(msg.get("callback_query_id") or ""),
+                    "from": {"id": int(msg.get("user_id") or 1)},
+                    "message": {
+                        "chat": {"id": int(msg.get("chat_id") or 1)},
+                    },
+                    "data": str(msg.get("callback_data") or ""),
+                    "source": str(msg.get("source") or "telegram"),
+                    "telegram_chat_id": int(msg.get("telegram_chat_id") or msg.get("chat_id") or 0),
+                }
+                for key in ("sender_label", "sender_session_id", "client_message_id"):
+                    value = msg.get(key)
+                    if value not in (None, "", 0):
+                        callback[key] = value
+                self._update_counter = max(offset, self._update_counter + 1)
+                return [{
+                    "update_id": self._update_counter,
+                    "callback_query": callback,
+                }]
 
             message = {
                 "chat": {"id": int(msg.get("chat_id") or 1)},
@@ -170,6 +192,8 @@ class LocalChatBridge:
         if not chat_id:
             return False
         chat_id = int(chat_id)
+        if self._telegram_student_index_approves_chat(chat_id):
+            return True
         if self._telegram_chat_id:
             return (
                 chat_id == self._telegram_chat_id
@@ -185,6 +209,14 @@ class LocalChatBridge:
         if self._telegram_active_chat_id and chat_id != self._telegram_active_chat_id:
             return False
         return True
+
+    def _telegram_student_index_approves_chat(self, chat_id: int) -> bool:
+        try:
+            from ouroboros.student_session import is_student_approved
+
+            return is_student_approved(int(chat_id))
+        except Exception:
+            return False
 
     def _restart_telegram_polling(self) -> None:
         self._stop_telegram_polling()
@@ -267,6 +299,45 @@ class LocalChatBridge:
                     update_id = int(update.get("update_id") or 0)
                     if update_id >= offset:
                         offset = update_id + 1
+                    callback_query = update.get("callback_query") or {}
+                    if callback_query:
+                        message = callback_query.get("message") or {}
+                        chat = message.get("chat") or {}
+                        sender = callback_query.get("from") or {}
+                        chat_id = int(chat.get("id") or 0)
+                        if not self._telegram_accepts_chat(chat_id):
+                            continue
+                        user_id = int(sender.get("id") or chat_id or 0)
+                        sender_name = (
+                            str(sender.get("username") or "").strip()
+                            or " ".join(
+                                str(part).strip()
+                                for part in (sender.get("first_name"), sender.get("last_name"))
+                                if part
+                            )
+                            or f"Telegram {user_id}"
+                        )
+                        callback_data = str(callback_query.get("data") or "")
+                        self._register_telegram_chat(chat_id)
+                        self.enqueue_local_callback(
+                            callback_data,
+                            callback_query_id=str(callback_query.get("id") or ""),
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            sender_label=f"Telegram ({sender_name})",
+                            telegram_chat_id=chat_id,
+                        )
+                        if self._broadcast_fn:
+                            self._broadcast_fn({
+                                "type": "chat",
+                                "role": "user",
+                                "content": f"[callback] {callback_data}",
+                                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                "source": "telegram",
+                                "sender_label": f"Telegram ({sender_name})",
+                                "telegram_chat_id": chat_id,
+                            })
+                        continue
                     message = update.get("message") or {}
                     text = str(message.get("text") or "").strip()
                     caption = str(message.get("caption") or "").strip()
@@ -341,7 +412,12 @@ class LocalChatBridge:
                 log.warning("Telegram polling error: %s", exc)
                 self._telegram_stop.wait(5)
 
-    def _send_telegram_text(self, text: str, preferred_chat_id: int = 0) -> None:
+    def _send_telegram_text(
+        self,
+        text: str,
+        preferred_chat_id: int = 0,
+        reply_markup: Optional[dict] = None,
+    ) -> None:
         clean_text = str(text or "").strip()
         if not clean_text or not self._telegram_bot_token:
             return
@@ -349,9 +425,12 @@ class LocalChatBridge:
         if not chat_id:
             return
         try:
+            params = {"chat_id": str(chat_id), "text": clean_text}
+            if reply_markup:
+                params["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             self._telegram_api(
                 "sendMessage",
-                params={"chat_id": str(chat_id), "text": clean_text},
+                params=params,
                 timeout=20,
             )
         except Exception:
@@ -470,6 +549,31 @@ class LocalChatBridge:
             "image_caption": caption_text,
         })
 
+    def enqueue_local_callback(
+        self,
+        callback_data: str,
+        *,
+        callback_query_id: str = "",
+        chat_id: int = 1,
+        user_id: int = 1,
+        sender_label: str = "",
+        sender_session_id: str = "",
+        client_message_id: str = "",
+        telegram_chat_id: int = 0,
+    ) -> None:
+        self._inbox.put({
+            "type": "callback_query",
+            "chat_id": int(chat_id or 1),
+            "user_id": int(user_id or 1),
+            "callback_data": str(callback_data or ""),
+            "callback_query_id": str(callback_query_id or ""),
+            "source": "telegram",
+            "sender_label": str(sender_label or ""),
+            "sender_session_id": str(sender_session_id or ""),
+            "client_message_id": str(client_message_id or ""),
+            "telegram_chat_id": int(telegram_chat_id or chat_id or 0),
+        })
+
     def send_message(
         self,
         chat_id: int,
@@ -478,6 +582,7 @@ class LocalChatBridge:
         ts: Optional[str] = None,
         is_progress: bool = False,
         task_id: str = "",
+        reply_markup: Optional[dict] = None,
     ) -> Tuple[bool, str]:
         """Put a message in the outbox for the UI to consume."""
         clean_text = _strip_markdown(text) if not parse_mode else text
@@ -489,6 +594,7 @@ class LocalChatBridge:
             "is_progress": bool(is_progress),
             "ts": message_ts,
             "task_id": str(task_id or ""),
+            "reply_markup": reply_markup or None,
         }
         self._outbox.put(msg)
         if self._broadcast_fn:
@@ -500,8 +606,13 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
+                "reply_markup": reply_markup or None,
             })
-        self._send_telegram_text(_strip_markdown(clean_text), preferred_chat_id=chat_id)
+        self._send_telegram_text(
+            _strip_markdown(clean_text),
+            preferred_chat_id=chat_id,
+            reply_markup=reply_markup,
+        )
         return True, "ok"
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
@@ -727,7 +838,8 @@ def log_chat(
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
                      is_progress: bool = False, task_id: str = "",
-                     ts: Optional[str] = None) -> None:
+                     ts: Optional[str] = None,
+                     reply_markup: Optional[dict] = None) -> None:
     # force_budget kept in signature for caller compat but is a no-op since 3.3.0
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
@@ -773,4 +885,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         return
 
     bridge = get_bridge()
-    bridge.send_message(chat_id, full, ts=msg_ts, is_progress=is_progress, task_id=task_id)
+    bridge.send_message(
+        chat_id,
+        full,
+        ts=msg_ts,
+        is_progress=is_progress,
+        task_id=task_id,
+        reply_markup=reply_markup,
+    )
