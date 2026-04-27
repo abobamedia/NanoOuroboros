@@ -65,6 +65,9 @@ class LocalChatBridge:
         self._broadcast_fn = None  # set by server.py for WebSocket streaming
         self._telegram_bot_token = ""
         self._telegram_chat_id: int = 0
+        self._telegram_owner_chat_id: int = 0
+        self._telegram_allowed_chat_ids: set[int] = set()
+        self._telegram_student_intake_enabled = False
         self._telegram_active_chat_id: int = 0
         self._telegram_poll_thread: Optional[threading.Thread] = None
         self._telegram_stop = threading.Event()
@@ -118,11 +121,23 @@ class LocalChatBridge:
         chat_id = self._parse_single_chat_id(
             str(settings.get("TELEGRAM_CHAT_ID", "") or "").strip(),
         )
+        owner_chat_id = self._parse_single_chat_id(
+            str(settings.get("TELEGRAM_OWNER_CHAT_ID", "") or "").strip(),
+        )
+        allowed_chat_ids = self._parse_chat_id_list(
+            str(settings.get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").strip(),
+        )
+        student_intake_enabled = str(
+            settings.get("TELEGRAM_STUDENT_INTAKE_ENABLED", "") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         token_changed = token != self._telegram_bot_token
         chat_id_changed = chat_id != self._telegram_chat_id
 
         self._telegram_bot_token = token
         self._telegram_chat_id = chat_id
+        self._telegram_owner_chat_id = owner_chat_id
+        self._telegram_allowed_chat_ids = allowed_chat_ids
+        self._telegram_student_intake_enabled = student_intake_enabled
         if chat_id:
             self._telegram_active_chat_id = chat_id
         elif token_changed:
@@ -142,6 +157,34 @@ class LocalChatBridge:
             return int(text)
         except ValueError:
             return 0
+
+    def _parse_chat_id_list(self, raw: str) -> set[int]:
+        ids: set[int] = set()
+        for part in re.split(r"[,;\s]+", str(raw or "").strip()):
+            chat_id = self._parse_single_chat_id(part)
+            if chat_id:
+                ids.add(chat_id)
+        return ids
+
+    def _telegram_accepts_chat(self, chat_id: int) -> bool:
+        if not chat_id:
+            return False
+        chat_id = int(chat_id)
+        if self._telegram_chat_id:
+            return (
+                chat_id == self._telegram_chat_id
+                or chat_id == self._telegram_owner_chat_id
+                or chat_id in self._telegram_allowed_chat_ids
+            )
+        if self._telegram_owner_chat_id and chat_id == self._telegram_owner_chat_id:
+            return True
+        if self._telegram_allowed_chat_ids:
+            return chat_id in self._telegram_allowed_chat_ids
+        if self._telegram_student_intake_enabled:
+            return True
+        if self._telegram_active_chat_id and chat_id != self._telegram_active_chat_id:
+            return False
+        return True
 
     def _restart_telegram_polling(self) -> None:
         self._stop_telegram_polling()
@@ -197,10 +240,10 @@ class LocalChatBridge:
         return response.content, mime
 
     def _telegram_target(self, preferred_chat_id: int = 0) -> int:
+        if preferred_chat_id and int(preferred_chat_id) > 1 and self._telegram_accepts_chat(int(preferred_chat_id)):
+            return int(preferred_chat_id)
         if self._telegram_chat_id:
             return self._telegram_chat_id
-        if preferred_chat_id and int(preferred_chat_id) > 1:
-            return int(preferred_chat_id)
         return int(self._telegram_active_chat_id or 0)
 
     def _register_telegram_chat(self, chat_id: int) -> None:
@@ -233,13 +276,7 @@ class LocalChatBridge:
                     chat = message.get("chat") or {}
                     sender = message.get("from") or {}
                     chat_id = int(chat.get("id") or 0)
-                    if self._telegram_chat_id and chat_id != self._telegram_chat_id:
-                        continue
-                    if (
-                        not self._telegram_chat_id
-                        and self._telegram_active_chat_id
-                        and chat_id != self._telegram_active_chat_id
-                    ):
+                    if not self._telegram_accepts_chat(chat_id):
                         continue
                     user_id = int(sender.get("id") or chat_id or 0)
                     sender_name = (

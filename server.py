@@ -45,6 +45,13 @@ from ouroboros.server_auth import (
 )
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
+from ouroboros.telegram_gateway import (
+    OWNER_COMMANDS as _TELEGRAM_OWNER_COMMANDS,
+    OWNER_ONLY_TEXT as _TELEGRAM_OWNER_ONLY_TEXT,
+    STUDENT_AGENT_PREFIX as _TELEGRAM_STUDENT_AGENT_PREFIX,
+    STUDENT_HELP_TEXT as _TELEGRAM_STUDENT_HELP_TEXT,
+    STUDENT_STATUS_TEXT as _TELEGRAM_STUDENT_STATUS_TEXT,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -346,6 +353,32 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             continue
 
         lowered = text.strip().lower()
+        telegram_source = str(source or "").lower() == "telegram" or int(telegram_chat_id or 0) > 0
+        telegram_owner = False
+        telegram_command = ""
+        if telegram_source:
+            command_head = lowered.split(maxsplit=1)[0] if lowered.strip() else ""
+            telegram_command = command_head.split("@", 1)[0]
+            owner_chat_id = 0
+            owner_raw = os.environ.get("TELEGRAM_OWNER_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID") or ""
+            try:
+                owner_chat_id = int(str(owner_raw).strip())
+            except ValueError:
+                owner_chat_id = 0
+            telegram_owner = bool(owner_chat_id and chat_id == owner_chat_id)
+        if telegram_source and telegram_command in ("/start", "/help"):
+            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_HELP_TEXT)
+            continue
+        if telegram_source and telegram_command == "/status" and not telegram_owner:
+            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_STATUS_TEXT)
+            continue
+        if telegram_source and telegram_command in _TELEGRAM_OWNER_COMMANDS and not telegram_owner:
+            ctx.send_with_budget(chat_id, _TELEGRAM_OWNER_ONLY_TEXT)
+            continue
+        if telegram_source and telegram_command.startswith("/") and not telegram_owner:
+            ctx.send_with_budget(chat_id, _TELEGRAM_STUDENT_HELP_TEXT)
+            continue
+
         if lowered.startswith("/panic"):
             ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
@@ -397,10 +430,16 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, ctx.soft_timeout, ctx.hard_timeout)
             ctx.send_with_budget(chat_id, status, force_budget=True)
         else:
-            ctx.consciousness.inject_observation(f"Owner message: {log_text}")
+            agent_text = text or image_caption
+            if telegram_source and not telegram_owner:
+                ctx.consciousness.inject_observation(f"Telegram student message: {log_text}")
+                sender_line = f"Telegram sender: {sender_label}\n" if sender_label else ""
+                agent_text = f"{_TELEGRAM_STUDENT_AGENT_PREFIX}\n\n{sender_line}Student message:\n{agent_text}"
+            else:
+                ctx.consciousness.inject_observation(f"Owner message: {log_text}")
             agent = ctx.get_chat_agent()
             if agent._busy:
-                agent.inject_message(text or image_caption, image_data=image_data)
+                agent.inject_message(agent_text, image_data=image_data)
             else:
                 ctx.consciousness.pause()
 
@@ -412,7 +451,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
                 threading.Thread(
                     target=_run_and_resume,
-                    args=(chat_id, text or image_caption, image_data),
+                    args=(chat_id, agent_text, image_data),
                     daemon=True,
                 ).start()
     return offset

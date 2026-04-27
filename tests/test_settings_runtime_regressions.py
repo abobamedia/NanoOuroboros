@@ -182,6 +182,186 @@ def test_api_command_uses_local_enqueue_semantics(monkeypatch, tmp_path):
     assert captured == {"text": "status", "kwargs": {"broadcast": False}}
 
 
+def test_telegram_start_is_static_and_skips_chat_agent(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    import supervisor.message_bus as message_bus
+
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+
+    class _Bridge:
+        def get_updates(self, offset, timeout=1):
+            return [{
+                "update_id": 1,
+                "message": {
+                    "chat": {"id": 958257094},
+                    "from": {"id": 958257094},
+                    "text": "/start",
+                    "source": "telegram",
+                    "telegram_chat_id": 958257094,
+                    "sender_label": "Telegram (vlad)",
+                },
+            }]
+
+    class _Ctx:
+        def __init__(self):
+            self.state = {"owner_id": 1, "owner_chat_id": 1}
+            self.sent = []
+            self.chat_calls = []
+
+        def load_state(self):
+            return dict(self.state)
+
+        def save_state(self, state):
+            self.state = dict(state)
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+        def handle_chat_direct(self, *args):
+            self.chat_calls.append(args)
+
+    ctx = _Ctx()
+    next_offset = server_module._process_bridge_updates(_Bridge(), 0, ctx)
+
+    assert next_offset == 2
+    assert ctx.chat_calls == []
+    assert ctx.sent[0][0] == 958257094
+    assert "Google Drive" in ctx.sent[0][1]
+    assert "выгрузкой" in ctx.sent[0][1]
+
+
+def test_telegram_non_owner_restart_is_denied(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    import supervisor.message_bus as message_bus
+
+    monkeypatch.setenv("TELEGRAM_OWNER_CHAT_ID", "111")
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+
+    class _Bridge:
+        def get_updates(self, offset, timeout=1):
+            return [{
+                "update_id": 2,
+                "message": {
+                    "chat": {"id": 222},
+                    "from": {"id": 222},
+                    "text": "/restart",
+                    "source": "telegram",
+                    "telegram_chat_id": 222,
+                },
+            }]
+
+    class _Ctx:
+        def __init__(self):
+            self.state = {"owner_id": 1, "owner_chat_id": 1}
+            self.sent = []
+            self.restart_called = False
+
+        def load_state(self):
+            return dict(self.state)
+
+        def save_state(self, state):
+            self.state = dict(state)
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+        def safe_restart(self, **kwargs):
+            self.restart_called = True
+            return True, "unexpected"
+
+    ctx = _Ctx()
+    server_module._process_bridge_updates(_Bridge(), 0, ctx)
+
+    assert not ctx.restart_called
+    assert ctx.sent == [(222, "Эта команда доступна только владельцу в Web UI.", {})]
+
+
+def test_telegram_student_drive_request_gets_safe_agent_prefix(monkeypatch, tmp_path):
+    server_module = _reload_server(monkeypatch, tmp_path)
+    import supervisor.message_bus as message_bus
+
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+
+    class _ImmediateThread:
+        def __init__(self, target, args=(), daemon=None):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(server_module.threading, "Thread", _ImmediateThread)
+
+    class _Bridge:
+        def get_updates(self, offset, timeout=1):
+            return [{
+                "update_id": 3,
+                "message": {
+                    "chat": {"id": 333},
+                    "from": {"id": 333},
+                    "text": "https://drive.google.com/drive/folders/demo оффер: окна, гео Москва",
+                    "source": "telegram",
+                    "telegram_chat_id": 333,
+                    "sender_label": "Telegram (student)",
+                },
+            }]
+
+    class _Consciousness:
+        def __init__(self):
+            self.observations = []
+            self.paused = 0
+            self.resumed = 0
+
+        def inject_observation(self, text):
+            self.observations.append(text)
+
+        def pause(self):
+            self.paused += 1
+
+        def resume(self):
+            self.resumed += 1
+
+    class _Agent:
+        _busy = False
+
+    class _Ctx:
+        def __init__(self):
+            self.state = {"owner_id": 1, "owner_chat_id": 1}
+            self.sent = []
+            self.chat_calls = []
+            self.consciousness = _Consciousness()
+
+        def load_state(self):
+            return dict(self.state)
+
+        def save_state(self, state):
+            self.state = dict(state)
+
+        def send_with_budget(self, chat_id, text, **kwargs):
+            self.sent.append((chat_id, text, kwargs))
+
+        def get_chat_agent(self):
+            return _Agent()
+
+        def handle_chat_direct(self, chat_id, text, image_data):
+            self.chat_calls.append((chat_id, text, image_data))
+
+    ctx = _Ctx()
+    server_module._process_bridge_updates(_Bridge(), 0, ctx)
+
+    assert ctx.consciousness.observations == [
+        "Telegram student message: https://drive.google.com/drive/folders/demo оффер: окна, гео Москва"
+    ]
+    assert ctx.consciousness.paused == 1
+    assert ctx.consciousness.resumed == 1
+    chat_id, agent_text, image_data = ctx.chat_calls[0]
+    assert chat_id == 333
+    assert image_data is None
+    assert "External Telegram student/media-buyer request" in agent_text
+    assert "Do not reveal internal identity" in agent_text
+    assert "https://drive.google.com/drive/folders/demo" in agent_text
+
+
 @pytest.mark.skipif(
     not (pathlib.Path(__file__).resolve().parents[1] / "launcher.py").exists(),
     reason="launcher.py not present in repo (bundle-only)",

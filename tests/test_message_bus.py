@@ -24,9 +24,43 @@ def test_parse_single_chat_id_invalid(monkeypatch):
     assert bridge._parse_single_chat_id("not-a-number") == 0
 
 
-def test_configure_from_settings_without_legacy_field(monkeypatch):
-    """After removing TELEGRAM_ALLOWED_CHAT_IDS, configure_from_settings
-    should work with only TELEGRAM_CHAT_ID."""
+def test_parse_chat_id_list(monkeypatch):
+    bridge = _make_bridge(monkeypatch)
+    assert bridge._parse_chat_id_list("111, 222;333 bad") == {111, 222, 333}
+
+
+def test_telegram_student_intake_allows_multiple_chats_when_enabled(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {
+        "TELEGRAM_BOT_TOKEN": "token",
+        "TELEGRAM_STUDENT_INTAKE_ENABLED": "1",
+    })
+    bridge._telegram_active_chat_id = 111
+
+    assert bridge._telegram_accepts_chat(111)
+    assert bridge._telegram_accepts_chat(222)
+
+
+def test_telegram_default_keeps_single_active_chat_guard(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {"TELEGRAM_BOT_TOKEN": "token"})
+    bridge._telegram_active_chat_id = 111
+
+    assert bridge._telegram_accepts_chat(111)
+    assert not bridge._telegram_accepts_chat(222)
+
+
+def test_telegram_target_uses_allowed_preferred_chat(monkeypatch):
+    bridge = _make_bridge(monkeypatch, {
+        "TELEGRAM_BOT_TOKEN": "token",
+        "TELEGRAM_CHAT_ID": "111",
+        "TELEGRAM_ALLOWED_CHAT_IDS": "222",
+    })
+
+    assert bridge._telegram_target(222) == 222
+    assert bridge._telegram_target(333) == 111
+
+
+def test_configure_from_settings_without_extra_fields(monkeypatch):
+    """configure_from_settings should work with only TELEGRAM_CHAT_ID."""
     bridge = _make_bridge(monkeypatch)
     bridge.configure_from_settings({
         "TELEGRAM_BOT_TOKEN": "",

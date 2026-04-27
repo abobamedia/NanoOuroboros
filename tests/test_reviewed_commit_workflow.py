@@ -1327,3 +1327,38 @@ def test_startup_check_surfaces_interrupted_review_continuation(tmp_path):
     assert result["status"] == "warning"
     assert result["open_review_continuations"][0]["task_id"] == "task-interrupted"
     assert result["interrupted_tasks"][0]["task_id"] == "task-interrupted"
+
+
+def test_startup_check_ignores_closed_review_continuations(tmp_path):
+    from ouroboros.agent_startup_checks import check_review_continuations
+    from ouroboros.task_continuation import ReviewContinuation, save_review_continuation
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    class FakeEnv:
+        drive_root = str(tmp_path)
+
+    write_task_result(
+        tmp_path,
+        "task-completed",
+        STATUS_COMPLETED,
+        result="Task completed after blocked review continuation was saved.",
+    )
+    save_review_continuation(
+        tmp_path,
+        ReviewContinuation(
+            task_id="task-completed",
+            source="blocked_review",
+            stage="blocking_review",
+            repo_key="repo-self",
+            tool_name="repo_commit",
+            attempt=1,
+            block_reason="critical_findings",
+        ),
+        expect_task_id="task-completed",
+    )
+
+    result, issues = check_review_continuations(FakeEnv())
+    assert issues == 0
+    assert result["status"] == "ok"
+    assert result["open_review_continuations"] == []
+    assert result["closed_review_continuations_ignored"] == 1

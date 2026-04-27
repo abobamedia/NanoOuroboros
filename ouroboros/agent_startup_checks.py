@@ -238,11 +238,21 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
             for item in task_rows
             if str(item.get("task_id") or "").strip()
         }
+        closed_statuses = {
+            STATUS_COMPLETED,
+            STATUS_FAILED,
+            STATUS_CANCELLED,
+            STATUS_REJECTED_DUPLICATE,
+        }
 
         rows = []
         interrupted = []
+        closed_count = 0
         for item in continuations:
             task_status = str((task_by_id.get(item.task_id) or {}).get("status") or "")
+            if task_status in closed_statuses:
+                closed_count += 1
+                continue
             row = {
                 "task_id": item.task_id,
                 "task_status": task_status or "missing",
@@ -275,6 +285,7 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
             "status": status,
             "open_review_continuations": rows[:20],
             "interrupted_tasks": interrupted[:20],
+            "closed_review_continuations_ignored": closed_count,
             "corrupt": corrupt[:20],
         }, issues
     except Exception as e:
