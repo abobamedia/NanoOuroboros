@@ -6,7 +6,7 @@
 [![macOS 12+](https://img.shields.io/badge/macOS-12%2B-black.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/joi-lab/ouroboros-desktop/releases)
-[![Version 4.18.10](https://img.shields.io/badge/version-4.18.10-green.svg)](VERSION)
+[![Version 4.18.11](https://img.shields.io/badge/version-4.18.11-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -379,6 +379,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 4.18.11 | 2026-04-27 | Make evolution/review retry notifications honest: repeated worker attempts now say `retrying (attempt N)` instead of repeating the same `started` message, reducing runaway-start spam after crashes while preserving first-start notifications. |
 | 4.18.10 | 2026-04-26 | New `read_url` tool: ingest public URLs (Google Drive folder/file with confirm-token via gdown, plain HTTP/HTTPS via urllib) into the sandboxed workspace and return file metadata for downstream skills. Lets the agent answer "read this link" requests directly instead of asking the owner to download manually. |
 | 4.18.9 | 2026-04-26 | Make background consolidation fail-soft when the default OpenRouter consolidation model lacks valid credentials: memory summaries now fall back to configured direct-provider runtime slots or skip auth-only failures without noisy 401 stack traces. |
 | 4.18.8 | 2026-04-26 | scope_review: provider-aware pack strategy — for openai-compatible models use touched-files+1-hop-deps instead of full-repo pack to fit Cloudflare 100s edge-timeout, keeping cross-module signal without prompt bloat. |

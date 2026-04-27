@@ -616,10 +616,15 @@ def assign_tasks() -> None:
                     st = load_state()
                     if st.get("owner_chat_id"):
                         emoji = '🧬' if task_type == 'evolution' else '🔎'
-                        send_with_budget(
-                            int(st["owner_chat_id"]),
-                            f"{emoji} {task_type.capitalize()} task {task['id']} started.",
-                        )
+                        attempt = int(task.get("_attempt") or 1)
+                        if attempt > 1:
+                            message = (
+                                f"{emoji} {task_type.capitalize()} task {task['id']} retrying "
+                                f"(attempt {attempt})."
+                            )
+                        else:
+                            message = f"{emoji} {task_type.capitalize()} task {task['id']} started."
+                        send_with_budget(int(st["owner_chat_id"]), message)
                 queue.persist_queue_snapshot(reason="assign_task")
 
 
@@ -721,7 +726,12 @@ def ensure_workers_healthy() -> None:
                             )
                         except Exception:
                             log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
-                        queue.enqueue_task(task, front=True)
+                        retried = dict(task)
+                        current_attempt = int(meta.get("attempt") or retried.get("_attempt") or 1)
+                        retried["_attempt"] = current_attempt + 1
+                        retried["crash_retry_from"] = str(w.busy_task_id)
+                        retried["crash_retry_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        queue.enqueue_task(retried, front=True)
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
 
