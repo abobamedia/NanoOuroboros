@@ -435,6 +435,9 @@ def handle_telegram_update(msg: dict[str, Any], ctx: Any, *, telegram_owner: boo
             return True
         _send_many(ctx, chat_id, _pack_chunk_responses(state, advance=True))
         return True
+    if command == "/retry":
+        _send_many(ctx, chat_id, _retry_current_generation(chat_id))
+        return True
     if command == "/delete_current":
         _send_many(ctx, chat_id, _delete_current(chat_id))
         return True
@@ -487,7 +490,7 @@ def _student_help_text() -> str:
         "2. Пришли Google Drive ссылку на выгрузку.\n"
         "3. Напиши бриф: ниша, оффер, гео, цель, аудитория, сколько вариантов.\n"
         "4. Оцени варианты кнопками: взять, отклонить, переписать.\n\n"
-        "Команды: /status, /more, /take N, /skip N reason, /rewrite N текст, /done, /cancel."
+        "Команды: /status, /more, /retry, /take N, /skip N reason, /rewrite N текст, /done, /cancel."
     )
 
 
@@ -545,6 +548,18 @@ def _start_generation_from_brief(state: dict[str, Any], brief_text: str) -> list
     ]
 
 
+def _retry_current_generation(chat_id: int) -> list[TelegramResponse]:
+    state = _current_pack_state(chat_id)
+    if not state:
+        return [TelegramResponse("Активной сессии нет. Напиши /new.")]
+    if not state.get("drive_url"):
+        return [TelegramResponse("В текущей сессии нет Google Drive ссылки. Пришли ссылку заново.")]
+    brief_text = str(state.get("brief_text") or "").strip()
+    if not brief_text:
+        return [TelegramResponse("В текущей сессии нет сохранённого брифа. Напиши бриф одним сообщением.")]
+    return _start_generation_from_brief(state, brief_text)
+
+
 def _run_generation(state: dict[str, Any]) -> dict[str, Any]:
     """Run the existing Direct generator/judge skills for one student request."""
     files = _ensure_export_files(state)
@@ -593,7 +608,16 @@ def _load_module(name: str, path: pathlib.Path) -> Any:
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous is not None:
+            sys.modules[name] = previous
+        else:
+            sys.modules.pop(name, None)
+        raise
     return module
 
 

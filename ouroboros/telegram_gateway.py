@@ -33,6 +33,7 @@ STUDENT_COMMANDS = {
     "/skip",
     "/rewrite",
     "/more",
+    "/retry",
     "/done",
     "/delete_current",
 }

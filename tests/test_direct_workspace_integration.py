@@ -34,6 +34,24 @@ def test_generator_prompt_contains_avoid_patterns():
     assert "План питания для похудения" in prompt
 
 
+def test_workspace_ingestion_derives_impressions_from_ctr_real_headers():
+    parser = _load(
+        "direct_ingestion_parser_for_test",
+        WORKSPACE / "skills" / "direct_ingestion" / "parser.py",
+    )
+    content = (
+        "№ Кампании;Название кампании;Поисковый запрос;Заголовок;Текст;"
+        "Расход, ₽;Клики;Конверсии;CR, %;CPA, ₽;CPC, ₽;CTR, %\n"
+        "707365438;Кампания;запрос;Заголовок;Текст;471.00;100;3;3.00;157.00;4.71;2.50\n"
+    )
+
+    row = parser.parse_direct_export(content)[0]
+
+    assert row.impressions == 4000
+    assert row.cost == 471.0
+    assert row.ctr == 0.025
+
+
 def test_direct_pipeline_sample_export_returns_creative_brief():
     pipeline = _load(
         "direct_creative_loop_for_test",

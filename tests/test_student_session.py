@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import pathlib
+import sys
 
 import pytest
 
@@ -190,6 +191,24 @@ def test_known_memory_builds_avoid_patterns_from_feedback(monkeypatch, tmp_path)
     assert any("План питания для похудения" in item for item in memory["avoid_patterns"])
 
 
+def test_load_module_registers_dataclass_module(monkeypatch, tmp_path):
+    module_path = tmp_path / "workspace_dataclass_module.py"
+    module_path.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass(frozen=True)\n"
+        "class CreativeBrief:\n"
+        "    rows_count: int\n",
+        encoding="utf-8",
+    )
+    module_name = "workspace_dataclass_module_for_student_session_test"
+    sys.modules.pop(module_name, None)
+
+    module = student_session._load_module(module_name, module_path)
+
+    assert sys.modules[module_name] is module
+    assert module.CreativeBrief(728_000).rows_count == 728_000
+
+
 def test_multi_tenant_status_does_not_leak_other_pack(monkeypatch, tmp_path):
     _data, _workspace = _roots(monkeypatch, tmp_path)
     monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "111 222")
@@ -270,3 +289,42 @@ def test_e2e_student_flow_with_mocked_generation(monkeypatch, tmp_path):
     assert events[-1]["schema_version"] == 2
     assert events[-1]["headline"] == "Что есть завтра, чтобы не сорваться"
     assert events[-1]["ui_source"] == "callback"
+
+
+def test_retry_reruns_saved_failed_generation(monkeypatch, tmp_path):
+    _data, _workspace = _roots(monkeypatch, tmp_path)
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_IDS", "333")
+    student = student_session.ensure_student(333)
+    state = student_session._new_session(333, student)
+    state["drive_url"] = "https://drive.google.com/drive/folders/demo"
+    state["brief_text"] = "ниша похудение, оффер дневник питания, гео РФ, 20 вариантов"
+    state["stage"] = student_session.STAGE_AWAITING_BRIEF
+    state["last_error"] = "AttributeError: old import failure"
+    student_session.save_pack_state(state)
+    calls = []
+
+    def fake_generation(next_state):
+        calls.append(next_state["brief_text"])
+        return {
+            "hypotheses": [{
+                "hypothesis_id": "hyp_0001",
+                "source_index": 0,
+                "headline": "Минус хаос в питании",
+                "text": "Дневник и меню помогают держать дефицит без догадок.",
+                "angle": "контроль",
+                "judge_verdict": "APPROVED",
+                "judge_score": 6,
+            }],
+            "judge_report": {"evaluations": []},
+            "meta": {"mocked": True},
+        }
+
+    monkeypatch.setattr(student_session, "_run_generation", fake_generation)
+    ctx = _Ctx()
+
+    student_session.handle_telegram_update({"chat_id": 333, "user_id": 333, "text": "/retry"}, ctx)
+
+    assert calls == ["ниша похудение, оффер дневник питания, гео РФ, 20 вариантов"]
+    assert "Пакет готов" in ctx.sent[0][1]
+    saved = student_session.load_pack_state(pathlib.Path(state["pack_state_path"]))
+    assert saved["stage"] == student_session.STAGE_AWAITING_FEEDBACK
